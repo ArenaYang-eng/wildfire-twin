@@ -199,7 +199,7 @@ with col_map:
     )
 
 # ==========================================
-# 6. 決策層：GeoAI 跨國霧霾應變 Copilot（防錯升級版）
+# 6. 決策層：GeoAI 跨國霧霾應變 Copilot（動態自適應模型版）
 # ==========================================
 with col_ai:
     st.subheader("🤖 跨國霾害應變 Copilot")
@@ -207,54 +207,75 @@ with col_ai:
     
     if st.button("🚨 啟動 GeoAI 決策推論", use_container_width=True):
         if not gemini_key:
-            st.warning("請先填寫 Gemini API Key（或於雲端 Secrets 配置）。")
+            st.warning("請填寫 Gemini API Key（或於雲端 Secrets 配置）。")
         else:
             with st.spinner("AI Agent 正在分析下風處風險並生成外交行動決策..."):
+                max_frp = fire_data['frp'].max() if 'frp' in fire_data else "N/A"
+                drift_dir = (wind_direction + 180) % 360
+                
+                prompt = f"""
+                你現在是「東南亞國協跨國霾害應變中心（ASMC）」的資深決策專家顧問。
+                系統已完成野火感知與擴散數值模擬，數據如下：
+                - 觀測場域：{region_choice}
+                - 衛星即時熱點總數：{len(fire_data)} 處
+                - 單點最高輻射能量 (FRP)：{max_frp} MW (泥炭地陰燃重大指標)
+                - 即時風場條件：風速 {wind_speed} km/h，煙塵漂移方位角 {drift_dir}°
+                
+                請以繁體中文撰寫一份高階應變行動指引，嚴格包含以下結構：
+                1. 【跨國擴散風險診斷】：評估未來 12-24 小時內，煙羽是否會進入新加坡、吉隆坡或麻六甲海峽國際海運航道？
+                2. 【泥炭地撲滅戰術方案】：針對泥炭地地下悶燒無法以傳統表面水撲滅的特性，提出水資源調度與阻隔溝渠開挖建議。
+                3. 【跨國協調與預警宣告】：依據《東南亞跨國霾害污染協議（AATHP）》，印尼應主動向受衝擊鄰國通報何種應變層級？
+                """
+                
                 try:
                     genai.configure(api_key=gemini_key.strip())
                     
-                    max_frp = fire_data['frp'].max() if 'frp' in fire_data else "N/A"
-                    drift_dir = (wind_direction + 180) % 360
-                    
-                    prompt = f"""
-                    你現在是「東南亞國協跨國霾害應變中心（ASMC）」的資深決策專家顧問。
-                    系統已完成野火感知與擴散數值模擬，數據如下：
-                    - 觀測場域：{region_choice}
-                    - 衛星即時熱點總數：{len(fire_data)} 處
-                    - 單點最高輻射能量 (FRP)：{max_frp} MW (泥炭地陰燃重大指標)
-                    - 即時風場條件：風速 {wind_speed} km/h，煙塵漂移方位角 {drift_dir}°
-                    
-                    請以繁體中文撰寫一份高階應變行動指引，嚴格包含以下結構：
-                    1. 【跨國擴散風險診斷】：評估未來 12-24 小時內，煙羽是否會進入新加坡、吉隆坡或麻六江海運航道？
-                    2. 【泥炭地撲滅戰術方案】：針對泥炭地地下悶燒無法以傳統表面水撲滅的特性，提出水資源調度與阻隔溝渠開挖建議。
-                    3. 【跨國協調與預警宣告】：依據《東南亞跨國霾害污染協議（AATHP）》，印尼應主動向受衝擊鄰國通報何種應變層級？
-                    """
-                    
-                    # 依序嘗試目前支援的模型名稱，避免特定名稱回傳 404 NotFound
-                    model_candidates = [
-                        'gemini-1.5-flash',
-                        'gemini-1.5-pro',
-                        'gemini-2.0-flash',
-                        'gemini-pro'
+                    # 1. 向 Google 動態查詢此 Key 真正支援的模型清單
+                    supported_models = [
+                        m.name for m in genai.list_models()
+                        if 'generateContent' in m.supported_generation_methods
                     ]
                     
-                    response = None
-                    last_err = None
-                    for m_name in model_candidates:
-                        try:
-                            model = genai.GenerativeModel(m_name)
-                            response = model.generate_content(prompt)
-                            if response and response.text:
-                                break
-                        except Exception as e:
-                            last_err = e
-                            continue
-                            
-                    if response and response.text:
-                        st.markdown(response.text)
+                    if not supported_models:
+                        raise Exception("此 API Key 尚未取得支援文字生成模型的權限。")
+                    
+                    # 2. 自動優先選擇含 flash 的快速模型，若無則挑清單第一項
+                    chosen_model = next(
+                        (m for m in supported_models if "flash" in m.lower()),
+                        supported_models[0]
+                    )
+                    
+                    st.caption(f"⚡ 成功自動配對模型：`{chosen_model}`")
+                    model = genai.GenerativeModel(chosen_model)
+                    res = model.generate_content(prompt)
+                    
+                    if res and res.text:
+                        st.markdown(res.text)
                     else:
-                        raise last_err if last_err else Exception("所有可用模型皆無回應")
-
+                        raise Exception("模型未回傳有效文字。")
+                        
                 except Exception as e:
-                    st.error(f"⚠️ AI 推論發生錯誤：{e}")
-                    st.info("💡 提示：請檢查側邊欄的 Google Gemini API Key 是否有多餘的空白字元，或確認該金鑰已於 Google AI Studio 啟用。")
+                    st.error(f"⚠️ 線上 AI 呼叫遇阻：{e}")
+                    st.info("💡 系統已自動啟動「備用演練決策方案」，確保 Demo 閉環展示不中斷：")
+                    
+                    # 保底展示報告
+                    st.markdown(f"""
+### 🚨 東南亞跨國霾害應變中心（ASMC）緊急決策指引 (示範情境)
+
+#### 1. 【跨國擴散風險診斷】
+* **空域威脅**：目前近地風向為偏南風（方位角 {wind_direction}°），煙羽正以 **{wind_speed} km/h** 速度朝方位角 **{drift_dir}°** 推進。
+* **衝擊評估**：
+  * **新加坡 (Singapore)**：距火場約 180 公里，預計 **8~12 小時內** 煙塵前鋒抵達，PSI（空氣污染指標）恐突破 150。
+  * **麻六甲海峽 (Strait of Malacca)**：國際繁忙航道能見度將降至 2 海浬以下，需對大型油輪發布航安警示。
+  * **馬來西亞半島南部 (Johor)**：預計明日清晨 PM2.5 濃度達到峰值。
+
+#### 2. 【泥炭地撲滅戰術方案】
+* **地下陰燃特性**：泥炭層深達數公尺，空中直升機投水僅能撲滅地表草火，無法熄滅地下悶燒。
+* **關鍵工程處置**：
+  * 立即調派挖土機於火線外圍 200 公尺開挖深達地下水位的「阻隔溝渠（Fire Trench）」。
+  * 啟動周邊運河閘門封堵作業，進行**泥炭地水文復育回補（Rewetting）**，提高地下水位阻絕氧氣。
+
+#### 3. 【跨國協調與預警宣告】
+* 依據《東南亞跨國霾害污染協議》（AATHP）第 9 條，印尼環境與林業部應於 **2 小時內向東協秘書處通報升級為「第二級警戒（Alert Level 2）」**。
+* 建議同步向新加坡國家環境局（NEA）與馬來西亞環境局（DOE）開放共享熱點遙測數據，啟動跨國人工增雨（Cloud Seeding）聯合防制協議。
+                    """)
