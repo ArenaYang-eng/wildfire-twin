@@ -199,7 +199,7 @@ with col_map:
     )
 
 # ==========================================
-# 6. 決策層：GeoAI 跨國霧霾應變 Copilot（動態自適應模型版）
+# 6. 決策層：GeoAI 跨國霧霾應變 Copilot（最新 Gemini 3.8 支援版）
 # ==========================================
 with col_ai:
     st.subheader("🤖 跨國霾害應變 Copilot")
@@ -227,38 +227,59 @@ with col_ai:
                 3. 【跨國協調與預警宣告】：依據《東南亞跨國霾害污染協議（AATHP）》，印尼應主動向受衝擊鄰國通報何種應變層級？
                 """
                 
+                response = None
+                chosen_model_used = None
+                
                 try:
                     genai.configure(api_key=gemini_key.strip())
                     
-                    # 1. 向 Google 動態查詢此 Key 真正支援的模型清單
-                    supported_models = [
-                        m.name for m in genai.list_models()
-                        if 'generateContent' in m.supported_generation_methods
+                    # 1. 優先嘗試 Google 官方推薦新用戶使用的最新主流模型
+                    candidate_models = [
+                        'gemini-3.8-flash',
+                        'gemini-3.5-flash',
+                        'gemini-3.1-flash-lite',
+                        'gemini-flash-latest'
                     ]
                     
-                    if not supported_models:
-                        raise Exception("此 API Key 尚未取得支援文字生成模型的權限。")
+                    for m_name in candidate_models:
+                        try:
+                            model = genai.GenerativeModel(m_name)
+                            res = model.generate_content(prompt)
+                            if res and res.text:
+                                response = res
+                                chosen_model_used = m_name
+                                break
+                        except Exception:
+                            continue
                     
-                    # 2. 自動優先選擇含 flash 的快速模型，若無則挑清單第一項
-                    chosen_model = next(
-                        (m for m in supported_models if "flash" in m.lower()),
-                        supported_models[0]
-                    )
-                    
-                    st.caption(f"⚡ 成功自動配對模型：`{chosen_model}`")
-                    model = genai.GenerativeModel(chosen_model)
-                    res = model.generate_content(prompt)
-                    
-                    if res and res.text:
-                        st.markdown(res.text)
+                    # 2. 若上述未通，自動從 API 名單中過濾掉已停用的 2.5 / 2.0 / 1.5 舊版
+                    if not response:
+                        for m in genai.list_models():
+                            m_name = m.name
+                            if any(retired in m_name for retired in ['2.5', '2.0', '1.5', 'gemini-pro']):
+                                continue
+                            if 'generateContent' in m.supported_generation_methods:
+                                try:
+                                    model = genai.GenerativeModel(m_name)
+                                    res = model.generate_content(prompt)
+                                    if res and res.text:
+                                        response = res
+                                        chosen_model_used = m_name
+                                        break
+                                except Exception:
+                                    continue
+
+                    if response and response.text:
+                        st.caption(f"⚡ 成功連線最新模型：`{chosen_model_used}`")
+                        st.markdown(response.text)
                     else:
-                        raise Exception("模型未回傳有效文字。")
+                        raise Exception("無法與可用模型建立對話通道。")
                         
                 except Exception as e:
                     st.error(f"⚠️ 線上 AI 呼叫遇阻：{e}")
                     st.info("💡 系統已自動啟動「備用演練決策方案」，確保 Demo 閉環展示不中斷：")
                     
-                    # 保底展示報告
+                    # 示範保底簡報
                     st.markdown(f"""
 ### 🚨 東南亞跨國霾害應變中心（ASMC）緊急決策指引 (示範情境)
 
