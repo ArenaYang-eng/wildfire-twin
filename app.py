@@ -46,28 +46,44 @@ with st.sidebar:
     st.info("💡 **架構提示**：本系統運作於 Streamlit Community Cloud，資料流每 30 分鐘自動透過 API 快取更新。")
 
 # ==========================================
-# 2. 感知層：抓取 NASA FIRMS 衛星火點
+# 2. 感知層：抓取 NASA FIRMS 衛星火點（增強除錯版）
 # ==========================================
 @st.cache_data(ttl=1800)
 def fetch_firms_hotspots(api_key, box):
+    # 高擬真示範火點資料庫（備用方案）
+    mock_fires = pd.DataFrame([
+        {"latitude": -1.85, "longitude": 103.62, "frp": 185.4, "confidence": "h"},
+        {"latitude": -2.12, "longitude": 103.88, "frp": 92.1, "confidence": "n"},
+        {"latitude": -1.45, "longitude": 102.95, "frp": 310.6, "confidence": "h"},
+        {"latitude": -2.40, "longitude": 104.15, "frp": 68.3, "confidence": "n"},
+        {"latitude": -0.95, "longitude": 102.30, "frp": 145.0, "confidence": "h"},
+        {"latitude": -1.20, "longitude": 103.10, "frp": 230.8, "confidence": "h"},
+        {"latitude": -2.80, "longitude": 104.50, "frp": 110.2, "confidence": "n"},
+    ])
+    
     if not api_key:
-        # 若未提供 Key，載入內建高擬真測試資料集以利 Demo 順暢運行
-        return pd.DataFrame([
-            {"latitude": -1.85, "longitude": 103.62, "frp": 185.4, "confidence": "h"},
-            {"latitude": -2.12, "longitude": 103.88, "frp": 92.1, "confidence": "n"},
-            {"latitude": -1.45, "longitude": 102.95, "frp": 310.6, "confidence": "h"},
-            {"latitude": -2.40, "longitude": 104.15, "frp": 68.3, "confidence": "n"},
-            {"latitude": -0.95, "longitude": 102.30, "frp": 145.0, "confidence": "h"},
-        ])
+        return mock_fires
     
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/VIIRS_SNPP_NRT/{box}/1"
     try:
         res = requests.get(url, timeout=10)
-        if res.status_code == 200 and "latitude" in res.text:
-            return pd.read_csv(StringIO(res.text))
+        # 如果 NASA 回傳錯誤訊息（例如金鑰尚未生效）
+        if "Invalid" in res.text or res.status_code != 200:
+            st.sidebar.warning(f"⚠️ NASA API 回應：{res.text.strip()}（已自動切換為高擬真演練數據）")
+            return mock_fires
+        
+        # 正常取得數據且有火點
+        if "latitude" in res.text:
+            df = pd.read_csv(StringIO(res.text))
+            if len(df) == 0:
+                st.sidebar.info("ℹ️ 今日該空域衛星未測得明火（已切換為演練數據供展示）")
+                return mock_fires
+            return df
     except Exception as e:
-        st.error(f"衛星資料連線異常：{e}")
-    return pd.DataFrame()
+        st.sidebar.error(f"衛星連線逾時：{e}（已切換為演練數據）")
+        return mock_fires
+        
+    return mock_fires
 
 # ==========================================
 # 3. 驅動層：即時大氣風場 (Open-Meteo)
