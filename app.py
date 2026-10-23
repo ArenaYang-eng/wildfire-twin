@@ -139,23 +139,20 @@ major_cities = pd.DataFrame([
 ])
 
 # ==========================================
-# 5. 展示層：3D 空間數位孿生圖台
+# 5. 展示層：3D 擬真衛星空照與中英雙語圖台
 # ==========================================
 col_map, col_ai = st.columns([65, 35])
 
 with col_map:
-    st.subheader("🌐 即時 3D 空間態勢展示")
+    st.subheader("🌐 即時 3D 空間態勢展示（擬真衛星航照模式）")
     
-    # 1. 3D 火點柱狀圖層（紅色垂直光柱，高度對應火災能量）
-    fire_layer = pdk.Layer(
-        "ColumnLayer",
-        data=fire_data,
-        get_position=["longitude", "latitude"],
-        get_elevation="frp * 250",
-        elevation_scale=1,
-        radius=4000,
-        get_fill_color=[255, 50, 0, 220],
-        pickable=True,
+    # 1. 擬真衛星空照圖層 (ESRI World Imagery，效果等同 Google Earth 衛星影像，完全免費)
+    satellite_layer = pdk.Layer(
+        "TileLayer",
+        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        min_zoom=0,
+        max_zoom=19,
+        tile_size=256,
     )
     
     # 2. 煙羽動態擴散層（半透明灰黃色擴散團）
@@ -164,22 +161,60 @@ with col_map:
         data=smoke_data,
         get_position=["lon", "lat"],
         get_radius="density * 800",
-        get_fill_color=[180, 160, 120, 110],
+        get_fill_color=[220, 200, 150, 110],
         pickable=True,
     )
-    
-    # 3. 國際受災核心城市標籤
-    city_layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=major_cities,
+
+    # 3. 3D 火點柱狀圖層（垂直立體火光柱）
+    fire_layer = pdk.Layer(
+        "ColumnLayer",
+        data=fire_data,
+        get_position=["longitude", "latitude"],
+        get_elevation="frp * 250",
+        elevation_scale=1,
+        radius=4000,
+        get_fill_color=[255, 30, 0, 230],
+        pickable=True,
+    )
+
+    # 4. 中英雙語對照地名與國別標籤資料庫
+    bilingual_labels = pd.DataFrame([
+        # 國家名稱 (黃色大字)
+        {"name": "Indonesia / 印度尼西亞", "lat": -2.3, "lon": 101.5, "size": 20, "color": [255, 230, 100, 240]},
+        {"name": "Malaysia / 馬來西亞", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 230, 100, 240]},
+        
+        # 國際戰略航道 (藍色斜紋感文字)
+        {"name": "Strait of Malacca / 麻六甲海峽", "lat": 2.2, "lon": 102.0, "size": 16, "color": [100, 220, 255, 220]},
+        
+        # 重點受災都市 (亮青色 / 附帶國旗辨識)
+        {"name": "🇸🇬 Singapore / 新加坡", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255, 255]},
+        {"name": "🇲🇾 Kuala Lumpur / 吉隆坡", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255, 255]},
+        {"name": "🇮🇩 Palembang / 巨港 (火場核心區)", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 210, 0, 255]},
+        {"name": "🇮🇩 Pekanbaru / 北干巴魯", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 210, 0, 255]},
+        {"name": "🇮🇩 Medan / 棉蘭", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [200, 240, 255, 220]},
+        {"name": "🇮🇩 Padang / 巴東", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [200, 240, 255, 220]},
+    ])
+
+    # 5. 中英文文字標籤圖層 (自帶半透明深色黑框，防止衛星圖太花導致看不清字)
+    text_layer = pdk.Layer(
+        "TextLayer",
+        data=bilingual_labels,
         get_position=["lon", "lat"],
-        get_radius=15000,
-        get_fill_color=[0, 200, 255, 255],
-        pickable=True,
+        get_text="name",
+        get_size="size",
+        get_color="color",
+        get_angle=0,
+        get_text_anchor="'middle'",
+        get_alignment_baseline="'center'",
+        background=True,
+        get_background_color=[10, 15, 25, 180], # 深黑微透膠囊底框
+        background_padding=[4, 2, 4, 2],
     )
     
+    # 組合所有圖層 (關閉原本黑底向量圖，換成真實衛星圖)
     deck = pdk.Deck(
-        layers=[smoke_layer, fire_layer, city_layer],
+        layers=[satellite_layer, smoke_layer, fire_layer, text_layer],
+        map_style=None,  # 設為 None 即可完全啟用底部的真實空照衛星影像！
         initial_view_state=pdk.ViewState(
             latitude=center_lat,
             longitude=center_lon,
@@ -197,7 +232,6 @@ with col_map:
         f"🧭 **微氣象遙測資訊**：近地風速 **{wind_speed} km/h**，來風方位角 **{wind_direction}°**。"
         f"煙霾正向 **{drift_dir}°**（預估擴散路徑）推進。"
     )
-
 # ==========================================
 # 6. 決策層：GeoAI 跨國霧霾應變 Copilot（最新 Gemini 3.8 支援版）
 # ==========================================
