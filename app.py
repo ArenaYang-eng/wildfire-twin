@@ -67,12 +67,10 @@ def fetch_firms_hotspots(api_key, box):
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/VIIRS_SNPP_NRT/{box}/1"
     try:
         res = requests.get(url, timeout=10)
-        # 如果 NASA 回傳錯誤訊息（例如金鑰尚未生效）
         if "Invalid" in res.text or res.status_code != 200:
             st.sidebar.warning(f"⚠️ NASA API 回應：{res.text.strip()}（已自動切換為高擬真演練數據）")
             return mock_fires
         
-        # 正常取得數據且有火點
         if "latitude" in res.text:
             df = pd.read_csv(StringIO(res.text))
             if len(df) == 0:
@@ -94,7 +92,7 @@ def fetch_wind_vector(lat, lon):
         res = requests.get(url, timeout=5).json()
         current = res.get("current", {})
         return current.get("wind_speed_10m", 12.0), current.get("wind_direction_10m", 200)
-    except:
+    except Exception:
         return 15.0, 210.0 # 預設西南季風
 
 # ==========================================
@@ -102,16 +100,14 @@ def fetch_wind_vector(lat, lon):
 # ==========================================
 def calculate_smoke_advection(fires, wind_spd, wind_dir):
     particles = []
-    # 煙霧受風推動，吹向的方位角 = (wind_dir + 180) % 360
     downwind_deg = (wind_dir + 180) % 360
     rad = math.radians(downwind_deg)
     
     for _, row in fires.iterrows():
         lat = row['latitude']
         lon = row['longitude']
-        frp = row.get('frp', 50.0) # 火災輻射功率 (MW)
+        frp = row.get('frp', 50.0)
         
-        # 模擬 2, 4, 8, 12 小時後的煙塵團核心
         for hr in [2, 4, 8, 12]:
             dist_km = wind_spd * hr
             delta_lat = (dist_km * math.cos(rad)) / 111.0
@@ -130,23 +126,15 @@ fire_data = fetch_firms_hotspots(firms_key, bbox)
 wind_speed, wind_direction = fetch_wind_vector(center_lat, center_lon)
 smoke_data = calculate_smoke_advection(fire_data, wind_speed, wind_direction)
 
-# 重要鄰近國際受災地標
-major_cities = pd.DataFrame([
-    {"name": "新加坡 (Singapore)", "lat": 1.3521, "lon": 103.8198},
-    {"name": "吉隆坡 (Kuala Lumpur)", "lat": 3.1390, "lon": 101.6869},
-    {"name": "巨港 (Palembang)", "lat": -2.9761, "lon": 104.7754},
-    {"name": "北干巴魯 (Pekanbaru)", "lat": 0.5071, "lon": 101.4478}
-])
-
 # ==========================================
-# 5. 展示層：真實衛星空照底圖 (Google Earth 風格) + 中英雙語對照
+# 5. 展示層：真實衛星空照底圖 + 中英雙語對照
 # ==========================================
 col_map, col_ai = st.columns([65, 35])
 
 with col_map:
     st.subheader("🌐 即時 3D 空間態勢展示（真實衛星空照影像）")
     
-    # 1. 真實高解析衛星空照底圖 (ESRI World Imagery，全球公認免費衛星影像，外觀同 Google Earth)
+    # 1. 真實衛星空照圖層 (ESRI World Imagery)
     satellite_layer = pdk.Layer(
         "TileLayer",
         data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -175,6 +163,93 @@ with col_map:
         radius=4000,
         get_fill_color=[255, 30, 0, 230],
         pickable=True,
+    )
+
+    # 4. 中英雙語標註資料庫
+    bilingual_labels = pd.DataFrame([
+        {"name": "印尼 (Indonesia)", "lat": -2.3, "lon": 101.5, "size": 18, "color": [255, 235, 100]},
+        {"name": "馬來西亞 (Malaysia)", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 235, 100]},
+        {"name": "麻六甲海峽 (Strait of Malacca)", "lat": 2.2, "lon": 102.0, "size": 15, "color": [100, 230, 255]},
+        {"name": "新加坡 (Singapore)", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255]},
+        {"name": "吉隆坡 (Kuala Lumpur)", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255]},
+        {"name": "巨港 (Palembang)", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 180, 0]},
+        {"name": "北干巴魯 (Pekanbaru)", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 180, 0]},
+        {"name": "棉蘭 (Medan)", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [200, 240, 255]},
+        {"name": "巴東 (Padang)", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [200, 240, 255]},
+    ])
+
+    # 提取所有要顯示的字元集，確保 Deck.gl 正確光柵化中文
+    label_chars = list(set("".join(bilingual_labels["name"].tolist()) + " /()-"))
+
+    # 中英文字標籤圖層
+    text_layer = pdk.Layer(
+        "TextLayer",
+        data=bilingual_labels,
+        get_position=["lon", "lat"],
+        get_text="name",
+        get_size="size",
+        get_color="color",
+        get_angle=0,
+        get_text_anchor="'middle'",
+        get_alignment_baseline="'center'",
+        font_family="'PingFang TC', 'Microsoft JhengHei', 'Noto Sans CJK TC', sans-serif",
+        character_set=label_chars,
+        background=True,
+        get_background_color=[15, 20, 30, 180],
+        background_padding=[4, 2, 4, 2],
+    )
+
+    # 組合圖層：底層為真實衛星空照圖
+    deck = pdk.Deck(
+        layers=[satellite_layer, smoke_layer, fire_layer, text_layer],
+        map_style=None,
+        initial_view_state=pdk.ViewState(
+            latitude=center_lat,
+            longitude=center_lon,
+            zoom=5.8,
+            pitch=45,
+            bearing=10
+        ),
+        tooltip={"text": "標的資訊: {name}\n火勢劇烈程度 (燃燒熱能): {frp} MW\n煙塵預估濃度: {density}"}
+    )
+    
+    st.pydeck_chart(deck)
+    
+    # ==========================================
+    # 5.1 通俗易懂圖例說明列 (Map Legend)
+    # ==========================================
+    legend_html = """
+    <div style="background-color: #1A1C24; padding: 12px 16px; border-radius: 8px; border: 1px solid #2E3342; margin-bottom: 15px;">
+        <div style="font-weight: 600; font-size: 14px; color: #E0E2EC; margin-bottom: 8px;">📑 圖面圖例說明 (Map Legend)：</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #C4C7D4;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: #FF1E00; border-radius: 2px; box-shadow: 0 0 6px #FF1E00;"></span>
+                <span><b>3D 紅色光柱</b>：衛星偵測起火點（<b>柱子越高代表火勢燒得越猛烈、熱度越高</b>）</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: rgba(220, 200, 150, 0.7); border-radius: 50%;"></span>
+                <span><b>灰黃色煙羽圈</b>：電腦模擬未來 2~12 小時<b>濃煙霧霾隨風飄散的範圍</b></span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: #00FFFF; border-radius: 50%; box-shadow: 0 0 6px #00FFFF;"></span>
+                <span><b>亮青色標籤</b>：下風處可能受霧霾波及的重要國際都市</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: #FFE664; border-radius: 2px;"></span>
+                <span><b>黃色文字標記</b>：泥炭地火場重災區與國界標示</span>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(legend_html, unsafe_allow_html=True)
+    
+    # 微氣象資訊
+    drift_dir = (wind_direction + 180) % 360
+    st.markdown(
+        f"🧭 **微氣象遙測資訊**：近地風速 **{wind_speed} km/h**，來風方位角 **{wind_direction}°**。"
+        f"煙霾正向 **{drift_dir}°**（預估擴散路徑）推進。"
+    )
+
 # ==========================================
 # 6. 決策層：GeoAI 跨國霧霾應變 Copilot（最新 Gemini 3.8 支援版）
 # ==========================================
@@ -210,7 +285,6 @@ with col_ai:
                 try:
                     genai.configure(api_key=gemini_key.strip())
                     
-                    # 1. 優先嘗試 Google 官方推薦新用戶使用的最新主流模型
                     candidate_models = [
                         'gemini-3.8-flash',
                         'gemini-3.5-flash',
@@ -229,7 +303,6 @@ with col_ai:
                         except Exception:
                             continue
                     
-                    # 2. 若上述未通，自動從 API 名單中過濾掉已停用的 2.5 / 2.0 / 1.5 舊版
                     if not response:
                         for m in genai.list_models():
                             m_name = m.name
@@ -256,7 +329,6 @@ with col_ai:
                     st.error(f"⚠️ 線上 AI 呼叫遇阻：{e}")
                     st.info("💡 系統已自動啟動「備用演練決策方案」，確保 Demo 閉環展示不中斷：")
                     
-                    # 示範保底簡報
                     st.markdown(f"""
 ### 🚨 東南亞跨國霾害應變中心（ASMC）緊急決策指引 (示範情境)
 
