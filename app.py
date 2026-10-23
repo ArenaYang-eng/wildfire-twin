@@ -127,16 +127,17 @@ wind_speed, wind_direction = fetch_wind_vector(center_lat, center_lon)
 smoke_data = calculate_smoke_advection(fire_data, wind_speed, wind_direction)
 
 # ==========================================
-# 5. 展示層：真實衛星空照底圖 + 中英雙語對照
+# 5. 展示層：真實衛星空照底圖 (Google Earth 風格) + 雙語標籤 (修復前端括號解析錯誤)
 # ==========================================
 col_map, col_ai = st.columns([65, 35])
 
 with col_map:
     st.subheader("🌐 即時 3D 空間態勢展示（真實衛星空照影像）")
     
-    # 1. 真實衛星空照圖層 (ESRI World Imagery)
+    # 1. 真實衛星空照圖層 (ESRI World Imagery，免 Key、高相容性)
     satellite_layer = pdk.Layer(
         "TileLayer",
+        id="satellite-tiles",
         data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
         min_zoom=0,
         max_zoom=19,
@@ -146,6 +147,7 @@ with col_map:
     # 2. 煙羽動態擴散層
     smoke_layer = pdk.Layer(
         "ScatterplotLayer",
+        id="smoke-plumes",
         data=smoke_data,
         get_position=["lon", "lat"],
         get_radius="density * 800",
@@ -156,6 +158,7 @@ with col_map:
     # 3. 3D 火點柱狀圖層（紅色立體光柱）
     fire_layer = pdk.Layer(
         "ColumnLayer",
+        id="fire-columns",
         data=fire_data,
         get_position=["longitude", "latitude"],
         get_elevation="frp * 250",
@@ -165,25 +168,25 @@ with col_map:
         pickable=True,
     )
 
-    # 4. 中英雙語標註資料庫
+    # 4. 中英雙語標註（移除括號等特殊字元，改用冒號或空格，避免前端表達式解析器誤判）
     bilingual_labels = pd.DataFrame([
-        {"name": "印尼 (Indonesia)", "lat": -2.3, "lon": 101.5, "size": 18, "color": [255, 235, 100]},
-        {"name": "馬來西亞 (Malaysia)", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 235, 100]},
-        {"name": "麻六甲海峽 (Strait of Malacca)", "lat": 2.2, "lon": 102.0, "size": 15, "color": [100, 230, 255]},
-        {"name": "新加坡 (Singapore)", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255]},
-        {"name": "吉隆坡 (Kuala Lumpur)", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255]},
-        {"name": "巨港 (Palembang)", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 180, 0]},
-        {"name": "北干巴魯 (Pekanbaru)", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 180, 0]},
-        {"name": "棉蘭 (Medan)", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [200, 240, 255]},
-        {"name": "巴東 (Padang)", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [200, 240, 255]},
+        {"name": "印尼 - Indonesia", "lat": -2.3, "lon": 101.5, "size": 18, "color": [255, 235, 100]},
+        {"name": "馬來西亞 - Malaysia", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 235, 100]},
+        {"name": "麻六甲海峽 - Strait of Malacca", "lat": 2.2, "lon": 102.0, "size": 15, "color": [100, 230, 255]},
+        {"name": "新加坡 - Singapore", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255]},
+        {"name": "吉隆坡 - Kuala Lumpur", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255]},
+        {"name": "巨港 - Palembang", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 180, 0]},
+        {"name": "北干巴魯 - Pekanbaru", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 180, 0]},
+        {"name": "棉蘭 - Medan", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [200, 240, 255]},
+        {"name": "巴東 - Padang", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [200, 240, 255]},
     ])
 
-    # 提取所有要顯示的字元集，確保 Deck.gl 正確光柵化中文
-    label_chars = list(set("".join(bilingual_labels["name"].tolist()) + " /()-"))
+    # 乾淨安全字集：只保留中英文、數字、減號與空格，避免任何 () 符號
+    clean_chars = list(set("".join(bilingual_labels["name"].tolist()) + " -"))
 
-    # 中英文字標籤圖層
     text_layer = pdk.Layer(
         "TextLayer",
+        id="city-labels",
         data=bilingual_labels,
         get_position=["lon", "lat"],
         get_text="name",
@@ -193,13 +196,13 @@ with col_map:
         get_text_anchor="'middle'",
         get_alignment_baseline="'center'",
         font_family="'PingFang TC', 'Microsoft JhengHei', 'Noto Sans CJK TC', sans-serif",
-        character_set=label_chars,
+        character_set=clean_chars,
         background=True,
         get_background_color=[15, 20, 30, 180],
         background_padding=[4, 2, 4, 2],
     )
 
-    # 組合圖層：底層為真實衛星空照圖
+    # 5. 組合圖台 (tooltip 移除字串中的括號以避開 JS Expression Parser 漏洞)
     deck = pdk.Deck(
         layers=[satellite_layer, smoke_layer, fire_layer, text_layer],
         map_style=None,
@@ -210,7 +213,10 @@ with col_map:
             pitch=45,
             bearing=10
         ),
-        tooltip={"text": "標的資訊: {name}\n火勢劇烈程度 (燃燒熱能): {frp} MW\n煙塵預估濃度: {density}"}
+        tooltip={
+            "html": "<b>標的名稱:</b> {name}<br/><b>火勢劇烈程度 FRP:</b> {frp} MW<br/><b>煙塵濃度指標:</b> {density}",
+            "style": {"backgroundColor": "rgba(20, 25, 35, 0.9)", "color": "white"}
+        }
     )
     
     st.pydeck_chart(deck)
