@@ -211,10 +211,10 @@ with col_map:
         background_padding=[4, 2, 4, 2],
     )
     
-    # 組合所有圖層 (關閉原本黑底向量圖，換成真實衛星圖)
+   # 渲染 3D 空間圖台 (滑鼠懸停文字已同步改成通俗用語)
     deck = pdk.Deck(
         layers=[satellite_layer, smoke_layer, fire_layer, text_layer],
-        map_style=None,  # 設為 None 即可完全啟用底部的真實空照衛星影像！
+        map_style=None,
         initial_view_state=pdk.ViewState(
             latitude=center_lat,
             longitude=center_lon,
@@ -222,35 +222,34 @@ with col_map:
             pitch=45,
             bearing=10
         ),
-        tooltip={"text": "標的資訊: {name}\n能量/密度指標: {frp}{density}"}
+        # 這裡將 FRP 替換為通俗的「火勢劇烈程度 / 熱能指數」
+        tooltip={"text": "標的資訊: {name}\n火勢劇烈程度 (燃燒熱能): {frp} MW\n煙塵預估濃度: {density}"}
     )
     
     st.pydeck_chart(deck)
-    # 渲染 3D 空間圖台
-    st.pydeck_chart(deck)
     
     # ==========================================
-    # 5.1 專業圖例說明列 (Map Legend)
+    # 5.1 通俗易懂圖例說明列 (Map Legend)
     # ==========================================
     legend_html = """
     <div style="background-color: #1A1C24; padding: 12px 16px; border-radius: 8px; border: 1px solid #2E3342; margin-bottom: 15px;">
-        <div style="font-weight: 600; font-size: 14px; color: #E0E2EC; margin-bottom: 8px;">📑 圖層與符號圖例說明 (Map Legend)：</div>
+        <div style="font-weight: 600; font-size: 14px; color: #E0E2EC; margin-bottom: 8px;">📑 圖面圖例說明 (Map Legend)：</div>
         <div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #C4C7D4;">
             <div style="display: flex; align-items: center; gap: 8px;">
                 <span style="display: inline-block; width: 14px; height: 14px; background-color: #FF1E00; border-radius: 2px; box-shadow: 0 0 6px #FF1E00;"></span>
-                <span><b>3D 紅色光柱</b>：NASA 衛星熱異常點（高度代表火災輻射功率 FRP，單位 MW）</span>
+                <span><b>3D 紅色光柱</b>：衛星偵測起火點（<b>柱子越高代表火勢燒得越猛烈、熱度越高</b>）</span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
                 <span style="display: inline-block; width: 14px; height: 14px; background-color: rgba(220, 200, 150, 0.7); border-radius: 50%;"></span>
-                <span><b>灰黃色煙羽圈</b>：物理模型模擬未來 2~12 小時煙塵動態擴散包絡線</span>
+                <span><b>灰黃色煙羽圈</b>：電腦模擬未來 2~12 小時<b>濃煙霧霾隨風飄散的範圍</b></span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
                 <span style="display: inline-block; width: 14px; height: 14px; background-color: #00FFFF; border-radius: 50%; box-shadow: 0 0 6px #00FFFF;"></span>
-                <span><b>亮青色標籤</b>：跨國受威脅關鍵首都與經貿都會區</span>
+                <span><b>亮青色標籤</b>：下風處可能受霧霾波及的重要國際都市</span>
             </div>
             <div style="display: flex; align-items: center; gap: 8px;">
                 <span style="display: inline-block; width: 14px; height: 14px; background-color: #FFE664; border-radius: 2px;"></span>
-                <span><b>黃色文字標記</b>：火場核心重災區 (泥炭地) 與主權邊界</span>
+                <span><b>黃色文字標記</b>：泥炭地火場重災區與國界標示</span>
             </div>
         </div>
     </div>
