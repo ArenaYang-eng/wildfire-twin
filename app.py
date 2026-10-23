@@ -139,24 +139,33 @@ major_cities = pd.DataFrame([
 ])
 
 # ==========================================
-# 5. 展示層：真實衛星空照底圖 + 中英雙語對照
+# 5. 展示層：真實衛星空照底圖 (Google Earth 風格) + 中英雙語對照
 # ==========================================
 col_map, col_ai = st.columns([65, 35])
 
 with col_map:
-    st.subheader("🌐 即時 3D 空間態勢展示（真實空照影像模式）")
+    st.subheader("🌐 即時 3D 空間態勢展示（真實衛星空照影像）")
     
-    # 1. 煙羽動態擴散層
+    # 1. 真實高解析衛星空照底圖 (ESRI World Imagery，全球公認免費衛星影像，外觀同 Google Earth)
+    satellite_layer = pdk.Layer(
+        "TileLayer",
+        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        min_zoom=0,
+        max_zoom=19,
+        tile_size=256,
+    )
+
+    # 2. 煙羽動態擴散層
     smoke_layer = pdk.Layer(
         "ScatterplotLayer",
         data=smoke_data,
         get_position=["lon", "lat"],
         get_radius="density * 800",
-        get_fill_color=[220, 200, 150, 100],
+        get_fill_color=[240, 220, 160, 120],
         pickable=True,
     )
 
-    # 2. 3D 火點柱狀圖層（紅色立體光柱）
+    # 3. 3D 火點柱狀圖層（紅色立體光柱）
     fire_layer = pdk.Layer(
         "ColumnLayer",
         data=fire_data,
@@ -166,98 +175,6 @@ with col_map:
         radius=4000,
         get_fill_color=[255, 30, 0, 230],
         pickable=True,
-    )
-
-    # 3. 中英雙語標註資料庫（調整字形以完整呈現繁體中文）
-    bilingual_labels = pd.DataFrame([
-        # 國家名稱
-        {"name": "印尼 (Indonesia)", "lat": -2.3, "lon": 101.5, "size": 18, "color": [255, 235, 100, 255]},
-        {"name": "馬來西亞 (Malaysia)", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 235, 100, 255]},
-        
-        # 戰略海域
-        {"name": "麻六甲海峽 (Strait of Malacca)", "lat": 2.2, "lon": 102.0, "size": 15, "color": [100, 220, 255, 230]},
-        
-        # 重點城市
-        {"name": "新加坡 (Singapore)", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255, 255]},
-        {"name": "吉隆坡 (Kuala Lumpur)", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255, 255]},
-        {"name": "巨港 (Palembang - 火場核心)", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 180, 0, 255]},
-        {"name": "北干巴魯 (Pekanbaru)", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 180, 0, 255]},
-        {"name": "棉蘭 (Medan)", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [220, 240, 255, 220]},
-        {"name": "巴東 (Padang)", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [220, 240, 255, 220]},
-    ])
-
-    # 4. 中英文字標籤圖層（強制指定字體編碼與深色背景框）
-    text_layer = pdk.Layer(
-        "TextLayer",
-        data=bilingual_labels,
-        get_position=["lon", "lat"],
-        get_text="name",
-        get_size="size",
-        get_color="color",
-        get_angle=0,
-        get_text_anchor="'middle'",
-        get_alignment_baseline="'center'",
-        background=True,
-        get_background_color=[15, 20, 30, 200],  # 深黑背景框
-        background_padding=[6, 3, 6, 3],
-        character_set="auto",  # 關鍵：開啟自動萬國碼支援，繁體中文才會正常顯示！
-    )
-
-    # 5. 擬真衛星空照底圖樣式 (使用全球標準 Esri 衛星圖，免金鑰、直出衛星圖)
-    deck = pdk.Deck(
-        layers=[smoke_layer, fire_layer, text_layer],
-        # 直接指定標準衛星空照樣式規範，取代灰白向量底圖
-        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
-        map_provider="carto",
-        initial_view_state=pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lon,
-            zoom=5.8,
-            pitch=45,
-            bearing=10
-        ),
-        tooltip={"text": "標的資訊: {name}\n火勢劇烈程度 (燃燒熱能): {frp} MW\n煙塵預估濃度: {density}"}
-    )
-    
-    # ==========================================
-    # 5.1 通俗易懂圖例說明列 (Map Legend)
-    # ==========================================
-    legend_html = """
-    <div style="background-color: #1A1C24; padding: 12px 16px; border-radius: 8px; border: 1px solid #2E3342; margin-bottom: 15px;">
-        <div style="font-weight: 600; font-size: 14px; color: #E0E2EC; margin-bottom: 8px;">📑 圖面圖例說明 (Map Legend)：</div>
-        <div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #C4C7D4;">
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="display: inline-block; width: 14px; height: 14px; background-color: #FF1E00; border-radius: 2px; box-shadow: 0 0 6px #FF1E00;"></span>
-                <span><b>3D 紅色光柱</b>：衛星偵測起火點（<b>柱子越高代表火勢燒得越猛烈、熱度越高</b>）</span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="display: inline-block; width: 14px; height: 14px; background-color: rgba(220, 200, 150, 0.7); border-radius: 50%;"></span>
-                <span><b>灰黃色煙羽圈</b>：電腦模擬未來 2~12 小時<b>濃煙霧霾隨風飄散的範圍</b></span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="display: inline-block; width: 14px; height: 14px; background-color: #00FFFF; border-radius: 50%; box-shadow: 0 0 6px #00FFFF;"></span>
-                <span><b>亮青色標籤</b>：下風處可能受霧霾波及的重要國際都市</span>
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px;">
-                <span style="display: inline-block; width: 14px; height: 14px; background-color: #FFE664; border-radius: 2px;"></span>
-                <span><b>黃色文字標記</b>：泥炭地火場重災區與國界標示</span>
-            </div>
-        </div>
-    </div>
-    """
-    st.markdown(legend_html, unsafe_allow_html=True)
-    
-    # 微氣象資訊
-    drift_dir = (wind_direction + 180) % 360
-    st.markdown(
-        f"🧭 **微氣象遙測資訊**：近地風速 **{wind_speed} km/h**，來風方位角 **{wind_direction}°**。"
-        f"煙霾正向 **{drift_dir}°**（預估擴散路徑）推進。"
-    )
-    drift_dir = (wind_direction + 180) % 360
-    st.markdown(
-        f"🧭 **微氣象遙測資訊**：近地風速 **{wind_speed} km/h**，來風方位角 **{wind_direction}°**。"
-        f"煙霾正向 **{drift_dir}°**（預估擴散路徑）推進。"
-    )
 # ==========================================
 # 6. 決策層：GeoAI 跨國霧霾應變 Copilot（最新 Gemini 3.8 支援版）
 # ==========================================
