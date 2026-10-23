@@ -4,6 +4,10 @@ import requests
 import pydeck as pdk
 import math
 import google.generativeai as genai
+import base64
+from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
+from io import BytesIO
 from io import StringIO
 
 # ==========================================
@@ -126,25 +130,99 @@ fire_data = fetch_firms_hotspots(firms_key, bbox)
 wind_speed, wind_direction = fetch_wind_vector(center_lat, center_lon)
 smoke_data = calculate_smoke_advection(fire_data, wind_speed, wind_direction)
 
+
 # ==========================================
-# 5. 展示層：真實衛星空照底圖 (Google Earth 風格) + 雙語標籤 (修復前端括號解析錯誤)
+# 4.5 衛星底圖：伺服器端拼接 Esri World Imagery 圖磚 -> 單張 BitmapLayer
+#     (st.pydeck_chart 的前端不支援 TileLayer 的自訂圖磚渲染，故改用此法)
+# ==========================================
+ESRI_TILE = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+
+def _lon2x(lon, z):
+    return (lon + 180.0) / 360.0 * 2 ** z
+
+def _lat2y(lat, z):
+    return (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * 2 ** z
+
+def _x2lon(x, z):
+    return x / 2 ** z * 360.0 - 180.0
+
+def _y2lat(y, z):
+    return math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / 2 ** z))))
+
+def _fetch_tile(z, x, y):
+    for _ in range(2):  # 失敗重試一次
+        try:
+            r = requests.get(
+                ESRI_TILE.format(z=z, x=x, y=y),
+                timeout=8,
+                headers={"User-Agent": "Mozilla/5.0 (streamlit-digital-twin)"},
+            )
+            if r.status_code == 200 and r.content:
+                return Image.open(BytesIO(r.content)).convert("RGB")
+        except Exception:
+            pass
+    return None
+
+@st.cache_data(ttl=7 * 86400, show_spinner="🛰️ 正在載入衛星空照底圖（首次約需數秒）...")
+def build_satellite_mosaic(west, south, east, north, z):
+    """把範圍內的 XYZ 圖磚拼成一張圖，回傳 (data URI, [W,S,E,N] 精確邊界, 成功磚數, 總磚數)"""
+    x0, x1 = int(_lon2x(west, z)), int(_lon2x(east, z))
+    y0, y1 = int(_lat2y(north, z)), int(_lat2y(south, z))
+    jobs = [(x, y) for y in range(y0, y1 + 1) for x in range(x0, x1 + 1)]
+    canvas = Image.new("RGB", ((x1 - x0 + 1) * 256, (y1 - y0 + 1) * 256), (30, 34, 44))
+    with ThreadPoolExecutor(8) as ex:
+        tiles = list(ex.map(lambda xy: _fetch_tile(z, xy[0], xy[1]), jobs))
+    ok = 0
+    for (x, y), t in zip(jobs, tiles):
+        if t is not None:
+            canvas.paste(t, ((x - x0) * 256, (y - y0) * 256))
+            ok += 1
+    bounds = [_x2lon(x0, z), _y2lat(y1 + 1, z), _x2lon(x1 + 1, z), _y2lat(y0, z)]
+    buf = BytesIO()
+    canvas.save(buf, "JPEG", quality=82)
+    uri = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+    return uri, bounds, ok, len(jobs)
+
+def make_bitmap_layer(layer_id, mosaic):
+    uri, bounds, ok, total = mosaic
+    return pdk.Layer(
+        "BitmapLayer",
+        id=layer_id,
+        data=None,
+        # 外層單引號 = 告訴 pydeck「這是字串常數，不要當成運算式」
+        image="'" + uri + "'",
+        bounds=bounds,
+        opacity=1.0,
+        parameters={"depthTest": False},
+    )
+
+# 廣域低解析 (整個東南亞，縮小時不會露出灰黑) + 近景高解析 (依所選區域)
+if "蘇門答臘" in region_choice:
+    near_box = (93.0, -9.0, 113.0, 9.0)
+else:
+    near_box = (104.0, -9.0, 123.0, 8.0)
+
+mosaic_wide = build_satellite_mosaic(88.0, -14.0, 128.0, 16.0, 5)
+mosaic_near = build_satellite_mosaic(*near_box, 7)   # 想放大看更細：把 7 改成 8（圖磚量約 4 倍）
+
+# ==========================================
+# 5. 展示層：Esri 衛星空照底圖 + 中英雙語地名標籤
 # ==========================================
 col_map, col_ai = st.columns([65, 35])
 
 with col_map:
     st.subheader("🌐 即時 3D 空間態勢展示（真實衛星空照影像）")
-    
-    # 1. 真實衛星空照圖層 (ESRI World Imagery，免 Key、高相容性)
-    satellite_layer = pdk.Layer(
-        "TileLayer",
-        id="satellite-tiles",
-        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        min_zoom=0,
-        max_zoom=19,
-        tile_size=256,
-    )
 
-    # 2. 煙羽動態擴散層
+    base_layers = []
+    for lid, m in (("sat-wide", mosaic_wide), ("sat-near", mosaic_near)):
+        if m[2] > 0:
+            base_layers.append(make_bitmap_layer(lid, m))
+    if not base_layers:
+        st.warning("⚠️ 無法連線 Esri 圖磚伺服器，暫時顯示預設底圖。")
+    elif mosaic_near[2] < mosaic_near[3]:
+        st.caption(f"ℹ️ 近景影像有 {mosaic_near[3] - mosaic_near[2]} 塊圖磚載入失敗（以深灰色補位），可重新整理重試。")
+
+    # 煙羽動態擴散層
     smoke_layer = pdk.Layer(
         "ScatterplotLayer",
         id="smoke-plumes",
@@ -155,7 +233,7 @@ with col_map:
         pickable=True,
     )
 
-    # 3. 3D 火點柱狀圖層（紅色立體光柱）
+    # 3D 火點柱狀圖層
     fire_layer = pdk.Layer(
         "ColumnLayer",
         id="fire-columns",
@@ -168,21 +246,50 @@ with col_map:
         pickable=True,
     )
 
-    # 4. 中英雙語標註（移除括號等特殊字元，改用冒號或空格，避免前端表達式解析器誤判）
-    bilingual_labels = pd.DataFrame([
-        {"name": "印尼 - Indonesia", "lat": -2.3, "lon": 101.5, "size": 18, "color": [255, 235, 100]},
-        {"name": "馬來西亞 - Malaysia", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 235, 100]},
-        {"name": "麻六甲海峽 - Strait of Malacca", "lat": 2.2, "lon": 102.0, "size": 15, "color": [100, 230, 255]},
-        {"name": "新加坡 - Singapore", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255]},
-        {"name": "吉隆坡 - Kuala Lumpur", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255]},
-        {"name": "巨港 - Palembang", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 180, 0]},
-        {"name": "北干巴魯 - Pekanbaru", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 180, 0]},
-        {"name": "棉蘭 - Medan", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [200, 240, 255]},
-        {"name": "巴東 - Padang", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [200, 240, 255]},
-    ])
-
-    # 乾淨安全字集：只保留中英文、數字、減號與空格，避免任何 () 符號
-    clean_chars = list(set("".join(bilingual_labels["name"].tolist()) + " -"))
+    # 中英雙語標註：(中文, 英文, 緯度, 經度, 類型)
+    GOLD, CYAN, ORANGE, WHITE, ICE = [255, 235, 100], [0, 255, 255], [255, 180, 0], [255, 255, 255], [200, 240, 255]
+    label_rows = [
+        # 國家
+        ("印尼", "Indonesia", -4.2, 104.0, 17, GOLD),
+        ("印尼", "Indonesia", -0.8, 112.0, 17, GOLD),
+        ("馬來西亞", "Malaysia", 5.2, 102.6, 17, GOLD),
+        ("馬來西亞", "Malaysia", 2.6, 113.0, 17, GOLD),
+        ("汶萊", "Brunei", 4.6, 114.7, 15, GOLD),
+        ("泰國", "Thailand", 8.0, 99.8, 17, GOLD),
+        ("新加坡", "Singapore", 1.3521, 103.8198, 15, CYAN),
+        # 島嶼 / 區域
+        ("蘇門答臘", "Sumatra", -1.6, 102.0, 15, WHITE),
+        ("婆羅洲", "Borneo", 1.0, 114.0, 15, WHITE),
+        ("爪哇", "Java", -7.4, 110.0, 15, WHITE),
+        ("亞齊", "Aceh", 4.6, 96.9, 12, ICE),
+        ("廖內", "Riau", 1.2, 101.9, 12, ICE),
+        # 海域
+        ("麻六甲海峽", "Strait of Malacca", 4.3, 99.3, 14, [100, 230, 255]),
+        ("南海", "South China Sea", 5.5, 108.5, 14, [100, 230, 255]),
+        ("爪哇海", "Java Sea", -5.0, 110.5, 14, [100, 230, 255]),
+        ("印度洋", "Indian Ocean", -4.0, 96.0, 14, [100, 230, 255]),
+        ("卡里馬塔海峽", "Karimata Strait", -2.0, 108.4, 12, [100, 230, 255]),
+        # 國際都市（下風處）
+        ("吉隆坡", "Kuala Lumpur", 3.1390, 101.6869, 14, CYAN),
+        ("馬六甲", "Malacca", 2.1896, 102.2501, 13, CYAN),
+        ("檳城", "Penang", 5.4141, 100.3288, 13, CYAN),
+        ("雅加達", "Jakarta", -6.2088, 106.8456, 14, CYAN),
+        # 火場周邊城市
+        ("巨港", "Palembang", -2.9761, 104.7754, 14, ORANGE),
+        ("北干巴魯", "Pekanbaru", 0.5071, 101.4478, 14, ORANGE),
+        ("占碑", "Jambi", -1.6101, 103.6131, 14, ORANGE),
+        ("班達楠榜", "Bandar Lampung", -5.4292, 105.2610, 13, ORANGE),
+        ("坤甸", "Pontianak", -0.0263, 109.3425, 14, ORANGE),
+        ("帕朗卡拉亞", "Palangka Raya", -2.2161, 113.9135, 14, ORANGE),
+        ("馬辰", "Banjarmasin", -3.3194, 114.5908, 13, ORANGE),
+        ("棉蘭", "Medan", 3.5952, 98.6722, 13, ICE),
+        ("巴東", "Padang", -0.9471, 100.4172, 13, ICE),
+        ("明古魯", "Bengkulu", -3.8004, 102.2655, 12, ICE),
+    ]
+    bilingual_labels = pd.DataFrame(
+        [{"name": f"{zh} {en}", "lat": la, "lon": lo, "size": sz, "color": col}
+         for zh, en, la, lo, sz, col in label_rows]
+    )
 
     text_layer = pdk.Layer(
         "TextLayer",
@@ -195,16 +302,17 @@ with col_map:
         get_angle=0,
         get_text_anchor="'middle'",
         get_alignment_baseline="'center'",
-        font_family="'PingFang TC', 'Microsoft JhengHei', 'Noto Sans CJK TC', sans-serif",
-        character_set=clean_chars,
+        # 關鍵修正 1：字型清單必須整串用單引號包成「字串常數」，且清單內不可再有引號
+        font_family="'Microsoft JhengHei, PingFang TC, Noto Sans CJK TC, Noto Sans TC, sans-serif'",
+        # 關鍵修正 2：不要傳字元 list（會被當運算式而解析失敗），直接讓 deck.gl 依資料自動產生字集
+        character_set="'auto'",
         background=True,
-        get_background_color=[15, 20, 30, 180],
+        get_background_color=[15, 20, 30, 190],
         background_padding=[4, 2, 4, 2],
     )
 
-    # 5. 組合圖台 (tooltip 移除字串中的括號以避開 JS Expression Parser 漏洞)
     deck = pdk.Deck(
-        layers=[satellite_layer, smoke_layer, fire_layer, text_layer],
+        layers=base_layers + [smoke_layer, fire_layer, text_layer],
         map_style=None,
         initial_view_state=pdk.ViewState(
             latitude=center_lat,
@@ -214,13 +322,14 @@ with col_map:
             bearing=10
         ),
         tooltip={
-            "html": "<b>標的名稱:</b> {name}<br/><b>火勢劇烈程度 FRP:</b> {frp} MW<br/><b>煙塵濃度指標:</b> {density}",
+            "html": "<b>火勢劇烈程度 FRP:</b> {frp} MW<br/><b>煙塵濃度指標:</b> {density}",
             "style": {"backgroundColor": "rgba(20, 25, 35, 0.9)", "color": "white"}
         }
     )
-    
+
     st.pydeck_chart(deck)
-    
+    st.caption("底圖影像：Esri, Maxar, Earthstar Geographics, and the GIS User Community")
+
     # ==========================================
     # 5.1 通俗易懂圖例說明列 (Map Legend)
     # ==========================================
