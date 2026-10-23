@@ -139,33 +139,24 @@ major_cities = pd.DataFrame([
 ])
 
 # ==========================================
-# 5. 展示層：3D 擬真衛星空照與中英雙語圖台
+# 5. 展示層：真實衛星空照底圖 + 中英雙語對照
 # ==========================================
 col_map, col_ai = st.columns([65, 35])
 
 with col_map:
-    st.subheader("🌐 即時 3D 空間態勢展示（擬真衛星航照模式）")
+    st.subheader("🌐 即時 3D 空間態勢展示（真實空照影像模式）")
     
-    # 1. 擬真衛星空照圖層 (ESRI World Imagery，效果等同 Google Earth 衛星影像，完全免費)
-    satellite_layer = pdk.Layer(
-        "TileLayer",
-        data="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-        min_zoom=0,
-        max_zoom=19,
-        tile_size=256,
-    )
-    
-    # 2. 煙羽動態擴散層（半透明灰黃色擴散團）
+    # 1. 煙羽動態擴散層
     smoke_layer = pdk.Layer(
         "ScatterplotLayer",
         data=smoke_data,
         get_position=["lon", "lat"],
         get_radius="density * 800",
-        get_fill_color=[220, 200, 150, 110],
+        get_fill_color=[220, 200, 150, 100],
         pickable=True,
     )
 
-    # 3. 3D 火點柱狀圖層（垂直立體火光柱）
+    # 2. 3D 火點柱狀圖層（紅色立體光柱）
     fire_layer = pdk.Layer(
         "ColumnLayer",
         data=fire_data,
@@ -177,25 +168,25 @@ with col_map:
         pickable=True,
     )
 
-    # 4. 中英雙語對照地名與國別標籤資料庫
+    # 3. 中英雙語標註資料庫（調整字形以完整呈現繁體中文）
     bilingual_labels = pd.DataFrame([
-        # 國家名稱 (黃色大字)
-        {"name": "Indonesia / 印度尼西亞", "lat": -2.3, "lon": 101.5, "size": 20, "color": [255, 230, 100, 240]},
-        {"name": "Malaysia / 馬來西亞", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 230, 100, 240]},
+        # 國家名稱
+        {"name": "印尼 (Indonesia)", "lat": -2.3, "lon": 101.5, "size": 18, "color": [255, 235, 100, 255]},
+        {"name": "馬來西亞 (Malaysia)", "lat": 3.8, "lon": 102.5, "size": 18, "color": [255, 235, 100, 255]},
         
-        # 國際戰略航道 (藍色斜紋感文字)
-        {"name": "Strait of Malacca / 麻六甲海峽", "lat": 2.2, "lon": 102.0, "size": 16, "color": [100, 220, 255, 220]},
+        # 戰略海域
+        {"name": "麻六甲海峽 (Strait of Malacca)", "lat": 2.2, "lon": 102.0, "size": 15, "color": [100, 220, 255, 230]},
         
-        # 重點受災都市 (亮青色 / 附帶國旗辨識)
-        {"name": "🇸🇬 Singapore / 新加坡", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255, 255]},
-        {"name": "🇲🇾 Kuala Lumpur / 吉隆坡", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255, 255]},
-        {"name": "🇮🇩 Palembang / 巨港 (火場核心區)", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 210, 0, 255]},
-        {"name": "🇮🇩 Pekanbaru / 北干巴魯", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 210, 0, 255]},
-        {"name": "🇮🇩 Medan / 棉蘭", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [200, 240, 255, 220]},
-        {"name": "🇮🇩 Padang / 巴東", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [200, 240, 255, 220]},
+        # 重點城市
+        {"name": "新加坡 (Singapore)", "lat": 1.3521, "lon": 103.8198, "size": 15, "color": [0, 255, 255, 255]},
+        {"name": "吉隆坡 (Kuala Lumpur)", "lat": 3.1390, "lon": 101.6869, "size": 15, "color": [0, 255, 255, 255]},
+        {"name": "巨港 (Palembang - 火場核心)", "lat": -2.9761, "lon": 104.7754, "size": 14, "color": [255, 180, 0, 255]},
+        {"name": "北干巴魯 (Pekanbaru)", "lat": 0.5071, "lon": 101.4478, "size": 14, "color": [255, 180, 0, 255]},
+        {"name": "棉蘭 (Medan)", "lat": 3.5952, "lon": 98.6722, "size": 13, "color": [220, 240, 255, 220]},
+        {"name": "巴東 (Padang)", "lat": -0.9471, "lon": 100.4172, "size": 13, "color": [220, 240, 255, 220]},
     ])
 
-    # 5. 中英文文字標籤圖層 (自帶半透明深色黑框，防止衛星圖太花導致看不清字)
+    # 4. 中英文字標籤圖層（強制指定字體編碼與深色背景框）
     text_layer = pdk.Layer(
         "TextLayer",
         data=bilingual_labels,
@@ -207,14 +198,17 @@ with col_map:
         get_text_anchor="'middle'",
         get_alignment_baseline="'center'",
         background=True,
-        get_background_color=[10, 15, 25, 180], # 深黑微透膠囊底框
-        background_padding=[4, 2, 4, 2],
+        get_background_color=[15, 20, 30, 200],  # 深黑背景框
+        background_padding=[6, 3, 6, 3],
+        character_set="auto",  # 關鍵：開啟自動萬國碼支援，繁體中文才會正常顯示！
     )
-    
-   # 渲染 3D 空間圖台 (滑鼠懸停文字已同步改成通俗用語)
+
+    # 5. 擬真衛星空照底圖樣式 (使用全球標準 Esri 衛星圖，免金鑰、直出衛星圖)
     deck = pdk.Deck(
-        layers=[satellite_layer, smoke_layer, fire_layer, text_layer],
-        map_style=None,
+        layers=[smoke_layer, fire_layer, text_layer],
+        # 直接指定標準衛星空照樣式規範，取代灰白向量底圖
+        map_style="https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+        map_provider="carto",
         initial_view_state=pdk.ViewState(
             latitude=center_lat,
             longitude=center_lon,
@@ -222,11 +216,8 @@ with col_map:
             pitch=45,
             bearing=10
         ),
-        # 這裡將 FRP 替換為通俗的「火勢劇烈程度 / 熱能指數」
         tooltip={"text": "標的資訊: {name}\n火勢劇烈程度 (燃燒熱能): {frp} MW\n煙塵預估濃度: {density}"}
     )
-    
-    st.pydeck_chart(deck)
     
     # ==========================================
     # 5.1 通俗易懂圖例說明列 (Map Legend)
