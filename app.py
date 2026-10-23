@@ -231,6 +231,7 @@ with col_map:
         get_radius="density * 800",
         get_fill_color=[240, 220, 160, 120],
         pickable=True,
+        parameters={"depthTest": False},  # 圓圈互相重疊時不再出現方塊狀破碎
     )
 
     # 3D 火點柱狀圖層
@@ -309,6 +310,7 @@ with col_map:
         background=True,
         get_background_color=[15, 20, 30, 190],
         background_padding=[4, 2, 4, 2],
+        parameters={"depthTest": False},  # 文字永遠畫在最上層，不被煙羽圈蓋住
     )
 
     deck = pdk.Deck(
