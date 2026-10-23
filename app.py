@@ -581,6 +581,17 @@ with col_map:
         f"煙霾整體向 **{int((mean_direction + 180) % 360)}°** 方向推進。"
     )
 
+def fmt_range(vals):
+    """多個情境的最早抵達時間 -> 範圍文字"""
+    got = [v for v in vals if v is not None]
+    if not got:
+        return "各情境 7 天內皆未受波及"
+    lo, hi = min(got), max(got)
+    txt = f"T+{lo} 小時" if lo == hi else f"T+{lo} ~ T+{hi} 小時"
+    if len(got) < len(vals):
+        txt += f"（{len(vals) - len(got)}/{len(vals)} 個情境未受波及）"
+    return txt
+
 # ==========================================
 # 6. 決策層：GeoAI 跨國霧霾應變 Copilot（最新 Gemini 3.8 支援版）
 # ==========================================
@@ -595,23 +606,57 @@ with col_ai:
             with st.spinner("AI Agent 正在分析下風處風險並生成外交行動決策..."):
                 max_frp = fire_data['frp'].max() if 'frp' in fire_data else "N/A"
                 drift_dir = (wind_direction + 180) % 360
-                
+                focus_h = st.session_state.get("anim_h", horizon_h) if play_on else horizon_h
+
+                # --- 未來風場時序（區域中心）---
+                tl_pts = [6, 12, 24, 48, 72, 168]
+                def _wd(h):
+                    return float(np.degrees(np.arctan2(-cu[h], -cv[h])) % 360)
+                wind_lines = "；".join(
+                    f"T+{h}h {round(float(np.hypot(cu[h], cv[h])), 1)} km/h、來風 {int(_wd(h))}°（{compass_zh(_wd(h))}）"
+                    for h in tl_pts)
+
+                # --- 各時間點城市狀態 ---
+                status_lines = []
+                for h in tl_pts:
+                    df_h = frame_df(sim, h)
+                    items = "、".join(
+                        f"{name.split()[0]}{city_status(df_h, name, clat, clon, first_hit[name], h).split(' ', 1)[1]}"
+                        for name, clat, clon in CITY_TARGETS)
+                    status_lines.append(f"T+{h}h：{items}")
+                status_text = "\n                  ".join(status_lines)
+
+                # --- 敏感度：風向 ±15°、風速 x0.7 / x1.3，各城市最早抵達時間的範圍 ---
+                variants = [(ws_use, (wd_use - 15) % 360), (ws_use, (wd_use + 15) % 360),
+                            (ws_use * 0.7, wd_use), (ws_use * 1.3, wd_use)]
+                hits = {name: [first_hit[name]] for name, _, _ in CITY_TARGETS}
+                for w_s, w_d in variants:
+                    fh = simulate_all(fire_data, *uv_from(w_s, w_d))["first_hit"]
+                    for name in hits:
+                        hits[name].append(fh[name])
+                range_map = {name: fmt_range(v) for name, v in hits.items()}
+                range_text = "；".join(f"{name.split()[0]} {r}" for name, r in range_map.items())
+
                 prompt = f"""
                 你現在是「東南亞國協跨國霾害應變中心（ASMC）」的資深決策專家顧問。
-                系統已完成野火感知與擴散數值模擬，數據如下：
+                系統已完成野火感知與未來 7 天的煙羽軌跡模擬（簡化拉格朗日模型，使用 10 m 風，未含邊界層與沉降），數據如下：
                 - 觀測場域：{region_choice}
-                - 衛星即時熱點總數：{len(fire_data)} 處
-                - 單點最高輻射能量 (FRP)：{max_frp} MW (泥炭地陰燃重大指標)
+                - 衛星即時熱點總數：{len(fire_data)} 處；單點最高輻射能量 (FRP)：{max_frp} MW (泥炭地陰燃重大指標)
                 - 目前風場：風速 {wind_speed} km/h，煙塵漂移方位角 {drift_dir}°
-                - 模擬情境：{scenario_txt}，預測時間 {horizon_label}，預測期間平均風速 {mean_speed} km/h
-                - 煙羽軌跡模擬各城市最早受覆蓋時間：{arrival_summary}
-                
+                - 模擬情境：{scenario_txt}；使用者目前檢視的預測時間為 T+{focus_h} 小時
+                - 區域中心未來風場時序：{wind_lines}
+                - 各城市最早受煙羽覆蓋時間（基準情境）：{arrival_summary}
+                - 敏感度範圍（風向 ±15°、風速 ×0.7 與 ×1.3 共 4 個擾動情境加基準）：{range_text}
+                - 各時間點城市狀態：
+                  {status_text}
+
+                請只使用上述數據，不要編造未提供的數字；數據不足之處請明確說明不確定性。
                 請以繁體中文撰寫一份高階應變行動指引，嚴格包含以下結構：
-                1. 【跨國擴散風險診斷】：依上述模擬結果，評估預測期間內煙羽是否會進入新加坡、吉隆坡或麻六甲海峽國際海運航道，並說明結果的不確定性與風向風速變動的影響？
+                1. 【跨國擴散風險診斷】：依風場時序與各時間點城市狀態，說明未來 6 小時、24 小時、3 天、7 天各階段的風險變化（含風向轉變造成的進入、退出），並以敏感度範圍說明抵達時間的不確定性，指出最需優先預警的城市與麻六甲海峽航道。
                 2. 【泥炭地撲滅戰術方案】：針對泥炭地地下悶燒無法以傳統表面水撲滅的特性，提出水資源調度與阻隔溝渠開挖建議。
-                3. 【跨國協調與預警宣告】：依據《東南亞跨國霾害污染協議（AATHP）》，印尼應主動向受衝擊鄰國通報何種應變層級？
+                3. 【跨國協調與預警宣告】：依據《東南亞跨國霾害污染協議（AATHP）》，印尼應在何時、向哪些鄰國、以何種層級通報；請標示哪些決定需等風場預報更新後再確認。
                 """
-                
+
                 response = None
                 chosen_model_used = None
                 
@@ -662,23 +707,24 @@ with col_ai:
                     st.error(f"⚠️ 線上 AI 呼叫遇阻：{e}")
                     st.info("💡 系統已自動啟動「備用演練決策方案」，確保 Demo 閉環展示不中斷：")
                     
+                    city_bullets = "\n".join(
+                        f"  * **{name}**：基準 {fmt_arrive(first_hit[name])}；敏感度範圍 {range_map[name]}"
+                        for name, _, _ in CITY_TARGETS)
+                    notify = "、".join(n.split()[0] for n, _, _ in CITY_TARGETS if first_hit[n] is not None) or "（模擬期內無城市受波及）"
                     st.markdown(f"""
-### 🚨 東南亞跨國霾害應變中心（ASMC）緊急決策指引 (示範情境)
+### 🚨 東南亞跨國霾害應變中心（ASMC）決策指引（示範輸出：由模擬結果自動彙整，非 AI 推論）
 
 #### 1. 【跨國擴散風險診斷】
-* **空域威脅**：目前近地風向為偏南風（方位角 {wind_direction}°），煙羽正以 **{wind_speed} km/h** 速度朝方位角 **{drift_dir}°** 推進。
-* **衝擊評估**：
-  * **新加坡 (Singapore)**：距火場約 180 公里，預計 **8~12 小時內** 煙塵前鋒抵達，PSI（空氣污染指標）恐突破 150。
-  * **麻六甲海峽 (Strait of Malacca)**：國際繁忙航道能見度將降至 2 海浬以下，需對大型油輪發布航安警示。
-  * **馬來西亞半島南部 (Johor)**：預計明日清晨 PM2.5 濃度達到峰值。
+* **風場時序**：{wind_lines}
+* **情境**：{scenario_txt}
+* **各城市最早受煙羽覆蓋時間**：
+{city_bullets}
 
 #### 2. 【泥炭地撲滅戰術方案】
-* **地下陰燃特性**：泥炭層深達數公尺，空中直升機投水僅能撲滅地表草火，無法熄滅地下悶燒。
-* **關鍵工程處置**：
-  * 立即調派挖土機於火線外圍 200 公尺開挖深達地下水位的「阻隔溝渠（Fire Trench）」。
-  * 啟動周邊運河閘門封堵作業，進行**泥炭地水文復育回補（Rewetting）**，提高地下水位阻絕氧氣。
+* 泥炭層可深達數公尺，地下陰燃無法以空中灑水撲滅，直升機投水僅能處理地表火。
+* 於火線外圍開挖阻隔溝渠至地下水位以下，並關閉周邊運河閘門進行水文回補（Rewetting），提高地下水位以隔絕氧氣。
 
 #### 3. 【跨國協調與預警宣告】
-* 依據《東南亞跨國霾害污染協議》（AATHP）第 9 條，印尼環境與林業部應於 **2 小時內向東協秘書處通報升級為「第二級警戒（Alert Level 2）」**。
-* 建議同步向新加坡國家環境局（NEA）與馬來西亞環境局（DOE）開放共享熱點遙測數據，啟動跨國人工增雨（Cloud Seeding）聯合防制協議。
+* 模擬顯示可能受波及的城市：{notify}。建議依 AATHP 與 ASMC 警戒機制向相關國家通報並共享熱點遙測數據；實際警戒等級與通報時限以官方機制為準。
+* 風向轉變會造成煙羽進入後再退出，請於風場預報更新後（每小時）重新評估。
                     """)
