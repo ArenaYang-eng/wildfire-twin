@@ -226,7 +226,43 @@ with col_map:
     )
     
     st.pydeck_chart(deck)
+    # 渲染 3D 空間圖台
+    st.pydeck_chart(deck)
     
+    # ==========================================
+    # 5.1 專業圖例說明列 (Map Legend)
+    # ==========================================
+    legend_html = """
+    <div style="background-color: #1A1C24; padding: 12px 16px; border-radius: 8px; border: 1px solid #2E3342; margin-bottom: 15px;">
+        <div style="font-weight: 600; font-size: 14px; color: #E0E2EC; margin-bottom: 8px;">📑 圖層與符號圖例說明 (Map Legend)：</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 20px; font-size: 13px; color: #C4C7D4;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: #FF1E00; border-radius: 2px; box-shadow: 0 0 6px #FF1E00;"></span>
+                <span><b>3D 紅色光柱</b>：NASA 衛星熱異常點（高度代表火災輻射功率 FRP，單位 MW）</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: rgba(220, 200, 150, 0.7); border-radius: 50%;"></span>
+                <span><b>灰黃色煙羽圈</b>：物理模型模擬未來 2~12 小時煙塵動態擴散包絡線</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: #00FFFF; border-radius: 50%; box-shadow: 0 0 6px #00FFFF;"></span>
+                <span><b>亮青色標籤</b>：跨國受威脅關鍵首都與經貿都會區</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="display: inline-block; width: 14px; height: 14px; background-color: #FFE664; border-radius: 2px;"></span>
+                <span><b>黃色文字標記</b>：火場核心重災區 (泥炭地) 與主權邊界</span>
+            </div>
+        </div>
+    </div>
+    """
+    st.markdown(legend_html, unsafe_allow_html=True)
+    
+    # 微氣象資訊
+    drift_dir = (wind_direction + 180) % 360
+    st.markdown(
+        f"🧭 **微氣象遙測資訊**：近地風速 **{wind_speed} km/h**，來風方位角 **{wind_direction}°**。"
+        f"煙霾正向 **{drift_dir}°**（預估擴散路徑）推進。"
+    )
     drift_dir = (wind_direction + 180) % 360
     st.markdown(
         f"🧭 **微氣象遙測資訊**：近地風速 **{wind_speed} km/h**，來風方位角 **{wind_direction}°**。"
