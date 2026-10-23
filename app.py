@@ -98,8 +98,17 @@ N_HOURS = 169                                    # t = 0 ~ 168 小時
 MAX_FIRES = 60                                   # 模擬採 FRP 最大的前 60 個火點
 RELEASE_STEP = 3                                 # 每 3 小時釋放一批煙團（持續排放）
 
-HORIZONS = {"6 小時": 6, "12 小時": 12, "18 小時": 18, "24 小時": 24,
-            "2 天": 48, "3 天": 72, "4 天": 96, "5 天": 120, "6 天": 144, "7 天": 168}
+HOURS = list(range(6, 169, 6))                   # 時間軸：6 小時 ~ 7 天，每 6 小時一格
+PLAY_INTERVAL_S = 1.5                            # 動態播放：每幾秒前進一格
+
+def fmt_h(h):
+    if h < 24:
+        return f"{h} 小時"
+    d, r = divmod(h, 24)
+    return f"{d} 天" if r == 0 else f"{d} 天 {r} 小時"
+
+def fmt_arrive(h):
+    return "7 天內未受波及" if h is None else f"T+{h} 小時（第 {h // 24 + 1} 天）"
 
 CITY_TARGETS = [
     ("新加坡 Singapore", 1.3521, 103.8198),
@@ -179,45 +188,68 @@ def spread_radius_km(age_h):
     """煙團半徑隨煙齡增長（示意參數，未經實測校正）"""
     return 8.0 + 4.0 * np.power(np.maximum(age_h, 0), 0.7)
 
-def simulate_plumes(fires, U, V, H, cities):
+@st.cache_data(show_spinner=False)
+def simulate_all(fires, U, V):
+    """一次模擬到 168 小時，保存每小時所有煙團位置；之後任何預測時間、動畫畫格都直接取用"""
+    T = N_HOURS - 1
     f = fires.copy()
     f["frp"] = pd.to_numeric(f["frp"], errors="coerce").fillna(50.0) if "frp" in f else 50.0
     f = f.nlargest(MAX_FIRES, "frp")
-    releases = np.arange(0, H, RELEASE_STEP)
+    releases = np.arange(0, T, RELEASE_STEP)
     nF, nR = len(f), len(releases)
     lat = np.repeat(f["latitude"].values[:, None].astype(float), nR, axis=1)
     lon = np.repeat(f["longitude"].values[:, None].astype(float), nR, axis=1)
     frp = np.repeat(f["frp"].values[:, None].astype(float), nR, axis=1)
-    rel = np.broadcast_to(releases[None, :], (nF, nR))
-    first_hit = {c[0]: None for c in cities}
+    rel = np.repeat(releases[None, :], nF, axis=0)
+    hist_lat = np.empty((T + 1, nF, nR), dtype=np.float32)
+    hist_lon = np.empty((T + 1, nF, nR), dtype=np.float32)
+    first_hit = {c[0]: None for c in CITY_TARGETS}
 
-    for t in range(0, H + 1):
-        active = (t - rel) >= 0
-        if t > 0:                                   # 檢查各城市是否被煙團覆蓋
-            la, lo, ag = lat[active], lon[active], (t - rel)[active]
-            rad = spread_radius_km(ag)
-            for name, clat, clon in cities:
+    for t in range(T + 1):
+        hist_lat[t], hist_lon[t] = lat, lon
+        age = t - rel
+        if t > 0:                                   # 各城市首次被煙團覆蓋的時間
+            m = age > 0
+            la, lo, rad = lat[m], lon[m], spread_radius_km(age[m])
+            for name, clat, clon in CITY_TARGETS:
                 if first_hit[name] is None:
                     d = np.hypot((la - clat) * 111.0, (lo - clon) * 111.0 * np.cos(np.radians(clat)))
                     if np.any(d <= rad):
                         first_hit[name] = t
-        if t == H:
+        if t == T:
             break
-        la, lo = lat[active], lon[active]           # 以第 t 小時風場推進 1 小時
+        active = age >= 0                           # 以第 t 小時風場推進 1 小時
+        la, lo = lat[active], lon[active]
         u, v = sample_wind(U, V, la, lo, t)
         lat[active] = la + v / 111.0
         lon[active] = lo + u / (111.0 * np.cos(np.radians(la)))
+    return {"lat": hist_lat, "lon": hist_lon, "rel": rel, "frp": frp, "nF": nF, "first_hit": first_hit}
 
-    age = (H - rel).astype(float)
-    dens = frp / (1.0 + age / 12.0)                 # 相對濃度指標（非實際 µg/m3）
-    df = pd.DataFrame({"lat": lat.ravel(), "lon": lon.ravel(), "age_h": age.ravel(),
-                       "frp": frp.ravel(), "density": dens.ravel()})
-    df["radius_m"] = spread_radius_km(df["age_h"].values) * 1000.0
-    still = {}
-    for name, clat, clon in cities:
-        d = np.hypot((df["lat"] - clat) * 111.0, (df["lon"] - clon) * 111.0 * np.cos(np.radians(clat)))
-        still[name] = bool(((d <= df["radius_m"] / 1000.0) & (df["age_h"] > 0)).any())
-    return df, first_hit, still, nF
+def frame_df(sim, H):
+    """取出預測時間 H 小時當下的煙團，回傳圖層用 DataFrame"""
+    age = H - sim["rel"]
+    m = age > 0
+    la, lo = sim["lat"][H][m].astype(float), sim["lon"][H][m].astype(float)
+    ag, fr = age[m].astype(float), sim["frp"][m]
+    dens = fr / (1.0 + ag / 12.0)                   # 相對濃度指標（非實際 µg/m3）
+    young = np.clip(ag / 96.0, 0, 1)                # 煙齡越長，顏色越淡
+    alpha = np.clip(18 + dens * 0.18, 18, 70)
+    df = pd.DataFrame({
+        "lat": la, "lon": lo,
+        "age_h": ag.round().astype(int), "frp": fr.round().astype(int),
+        "density": dens.round().astype(int),
+        "radius_m": spread_radius_km(ag) * 1000.0,
+        "fill": [[255, int(190 + 45 * y), int(60 + 110 * y), int(a)] for y, a in zip(young, alpha)],
+    })
+    return df
+
+def city_status(df, name, clat, clon, first_h, H):
+    d = np.hypot((df["lat"] - clat) * 111.0, (df["lon"] - clon) * 111.0 * np.cos(np.radians(clat)))
+    if bool((d <= df["radius_m"] / 1000.0).any()):
+        return "🟠 煙羽覆蓋中"
+    if first_h is not None and first_h <= H:
+        return "🟢 曾受影響，已移出"
+    return "⚪ 尚未抵達"
 
 # 執行：火點 + 風場預報（煙羽模擬在使用者設定情境後於地圖區執行）
 fire_data = fetch_firms_hotspots(firms_key, bbox)
@@ -306,9 +338,14 @@ col_map, col_ai = st.columns([65, 35])
 with col_map:
     st.subheader("🌐 即時 3D 空間態勢展示（真實衛星空照影像）")
 
-    # ---------- 情境設定：預測時間 + 風場來源 ----------
-    horizon_label = st.select_slider("⏱️ 預測時間（自現在起算）", options=list(HORIZONS.keys()), value="24 小時")
-    H = HORIZONS[horizon_label]
+    # ---------- 情境設定：預測時間 / 動態播放 / 風場來源 ----------
+    horizon_h = st.select_slider("⏱️ 預測時間（自現在起算）", options=HOURS, value=24, format_func=fmt_h)
+    horizon_label = fmt_h(horizon_h)
+    play_on = False
+    if hasattr(st, "fragment"):
+        play_on = st.toggle(f"▶️ 動態播放（由 6 小時自動播放到 7 天，每 {PLAY_INTERVAL_S:g} 秒前進 6 小時）", value=False)
+    else:
+        st.caption("ℹ️ 目前的 Streamlit 版本不支援動態播放，請升級至 1.37 以上。")
 
     wind_mode = st.radio("🌬️ 風場來源", ["Open-Meteo 逐時預報", "手動設定風場"], horizontal=True)
     if wind_mode == "Open-Meteo 逐時預報":
@@ -331,23 +368,19 @@ with col_map:
         scenario_txt = f"手動固定風場（來風 {man_dir}°，{man_spd} km/h）"
 
     U, V = uv_from(ws_use, wd_use)
-    smoke_data, first_hit, still_cover, n_fires_used = simulate_plumes(fire_data, U, V, H, CITY_TARGETS)
+    sim = simulate_all(fire_data, U, V)      # 只在風場情境改變時重算，動畫畫格直接取用
+    n_fires_used = sim["nF"]
+    first_hit = sim["first_hit"]
+    arrival_summary = "；".join(f"{name}：{fmt_arrive(first_hit[name])}" for name, _, _ in CITY_TARGETS)
 
-    # 供微氣象文字與 AI 使用：區域中心的目前風與預測期間平均風
+    # 區域中心的風時序（供微氣象文字、AI 與風場時序圖使用）
     c_lat, c_lon = np.array([center_lat]), np.array([center_lon])
-    cu = np.array([sample_wind(U, V, c_lat, c_lon, t)[0][0] for t in range(H + 1)])
-    cv = np.array([sample_wind(U, V, c_lat, c_lon, t)[1][0] for t in range(H + 1)])
+    cu = np.array([sample_wind(U, V, c_lat, c_lon, t)[0][0] for t in range(N_HOURS)])
+    cv = np.array([sample_wind(U, V, c_lat, c_lon, t)[1][0] for t in range(N_HOURS)])
     wind_speed = round(float(np.hypot(cu[0], cv[0])), 1)
     wind_direction = round(float(np.degrees(np.arctan2(-cu[0], -cv[0])) % 360), 0)
-    mean_speed = round(float(np.hypot(cu.mean(), cv.mean())), 1)
-    mean_direction = round(float(np.degrees(np.arctan2(-cu.mean(), -cv.mean())) % 360), 0)
-
-    # 煙團圖層資料：整數化、依煙齡與火勢決定透明度
-    smoke_data["age_h"] = smoke_data["age_h"].round().astype(int)
-    smoke_data["frp"] = smoke_data["frp"].round().astype(int)
-    smoke_data["density"] = smoke_data["density"].round().astype(int)
-    alpha = np.clip(6 + smoke_data["density"].values * 0.10, 6, 40).astype(int)
-    smoke_data["fill"] = [[240, 220, 160, int(a)] for a in alpha]
+    mean_speed = round(float(np.hypot(cu[:horizon_h + 1].mean(), cv[:horizon_h + 1].mean())), 1)
+    mean_direction = round(float(np.degrees(np.arctan2(-cu[:horizon_h + 1].mean(), -cv[:horizon_h + 1].mean())) % 360), 0)
 
     fire_plot = fire_data.copy()
     fire_plot["frp"] = pd.to_numeric(fire_plot["frp"], errors="coerce").fillna(50.0)
@@ -362,31 +395,6 @@ with col_map:
         st.warning("⚠️ 無法連線 Esri 圖磚伺服器，暫時顯示預設底圖。")
     elif mosaic_near[2] < mosaic_near[3]:
         st.caption(f"ℹ️ 近景影像有 {mosaic_near[3] - mosaic_near[2]} 塊圖磚載入失敗（以深灰色補位），可重新整理重試。")
-
-    # 煙羽動態擴散層
-    smoke_layer = pdk.Layer(
-        "ScatterplotLayer",
-        id="smoke-plumes",
-        data=smoke_data,
-        get_position=["lon", "lat"],
-        get_radius="radius_m",
-        get_fill_color="fill",
-        pickable=True,
-        parameters={"depthTest": False},  # 圓圈互相重疊時不再出現方塊狀破碎
-    )
-
-    # 3D 火點柱狀圖層
-    fire_layer = pdk.Layer(
-        "ColumnLayer",
-        id="fire-columns",
-        data=fire_plot,
-        get_position=["longitude", "latitude"],
-        get_elevation="frp * 250",
-        elevation_scale=1,
-        radius=4000,
-        get_fill_color=[255, 30, 0, 230],
-        pickable=True,
-    )
 
     # 中英雙語標註：(中文, 英文, 緯度, 經度, 類型)
     GOLD, CYAN, ORANGE, WHITE, ICE = [255, 235, 100], [0, 255, 255], [255, 180, 0], [255, 255, 255], [200, 240, 255]
@@ -454,50 +462,82 @@ with col_map:
         parameters={"depthTest": False},  # 文字永遠畫在最上層，不被煙羽圈蓋住
     )
 
-    deck = pdk.Deck(
-        layers=base_layers + [smoke_layer, fire_layer, text_layer],
-        map_style=None,
-        initial_view_state=pdk.ViewState(
-            latitude=center_lat,
-            longitude=center_lon,
-            zoom=5.8,
-            pitch=45,
-            bearing=10
-        ),
-        tooltip={
-            "html": "<b>火勢 FRP:</b> {frp} MW<br/><b>煙齡:</b> {age_h} 小時<br/><b>相對濃度指標:</b> {density}",
-            "style": {"backgroundColor": "rgba(20, 25, 35, 0.9)", "color": "white"}
-        }
-    )
-
-    st.pydeck_chart(deck)
-    st.caption("底圖影像：Esri, Maxar, Earthstar Geographics, and the GIS User Community")
-
-    # ---------- 下風處城市：最早受煙羽覆蓋時間 ----------
-    st.markdown(f"##### 🏙️ 下風處城市影響評估（{horizon_label}內，{scenario_txt}）")
-    rows, arrival_lines = [], []
-    for name, _, _ in CITY_TARGETS:
-        h = first_hit[name]
-        if h is None:
-            arrive = "預測期內未受波及"
+    def draw_map():
+        """地圖 + 城市表。播放時由 st.fragment 定時重跑，只更新這一塊，不會重跑整頁。"""
+        if play_on:
+            cur = st.session_state.get("anim_h", 0) + 6
+            if cur > 168:
+                cur = 6
+            st.session_state["anim_h"] = cur
+            H = cur
         else:
-            arrive = f"T+{h} 小時（第 {h // 24 + 1} 天）"
-        rows.append({"城市": name, "最早受煙羽覆蓋": arrive,
-                     f"{horizon_label}時點仍受影響": "是" if still_cover[name] else "否"})
-        arrival_lines.append(f"{name}：{arrive}")
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
-    arrival_summary = "；".join(arrival_lines)
+            H = horizon_h
+        smoke_df = frame_df(sim, H)
+
+        smoke_layer = pdk.Layer(
+            "ScatterplotLayer",
+            id="smoke-plumes",
+            data=smoke_df,
+            get_position=["lon", "lat"],
+            get_radius="radius_m",
+            get_fill_color="fill",
+            pickable=True,
+            parameters={"depthTest": False},
+        )
+        fire_layer = pdk.Layer(
+            "ColumnLayer",
+            id="fire-columns",
+            data=fire_plot,
+            get_position=["longitude", "latitude"],
+            get_elevation="frp * 250",
+            elevation_scale=1,
+            radius=4000,
+            get_fill_color=[255, 30, 0, 230],
+            pickable=True,
+        )
+        deck = pdk.Deck(
+            layers=base_layers + [smoke_layer, fire_layer, text_layer],
+            map_style=None,
+            initial_view_state=pdk.ViewState(
+                latitude=center_lat, longitude=center_lon, zoom=5.8, pitch=45, bearing=10
+            ),
+            tooltip={
+                "html": "<b>火勢 FRP:</b> {frp} MW<br/><b>煙齡:</b> {age_h} 小時<br/><b>相對濃度指標:</b> {density}",
+                "style": {"backgroundColor": "rgba(20, 25, 35, 0.9)", "color": "white"}
+            }
+        )
+
+        when = ""
+        if wind_ok:
+            t0 = datetime.strptime(wind_start, "%Y-%m-%dT%H:%M")
+            when = f"｜約 {(t0 + pd.Timedelta(hours=H)).strftime('%m/%d %H:%M')} UTC"
+        st.markdown(f"#### ⏱️ 目前顯示：預測 **T+{H} 小時**（{fmt_h(H)}）{when}")
+        st.progress(H / 168)
+        st.pydeck_chart(deck)
+        st.caption("底圖影像：Esri, Maxar, Earthstar Geographics, and the GIS User Community"
+                   + ("　｜　播放中縮放／平移會在下一格重置，想自由操作請先關閉播放。" if play_on else ""))
+
+        st.markdown(f"##### 🏙️ 下風處城市影響評估（{scenario_txt}）")
+        rows = [{"城市": name,
+                 "目前狀態": city_status(smoke_df, name, clat, clon, first_hit[name], H),
+                 "最早受煙羽覆蓋": fmt_arrive(first_hit[name])}
+                for name, clat, clon in CITY_TARGETS]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    if play_on:
+        st.fragment(run_every=PLAY_INTERVAL_S)(draw_map)()
+    else:
+        draw_map()
 
     note = f"模擬採 FRP 最大的前 {n_fires_used} 個火點，" if len(fire_data) > n_fires_used else ""
-    st.caption(f"{note}假設火點持續排放、每 {RELEASE_STEP} 小時釋放一批煙團；圈越大代表煙齡越長、擴散越廣。"
+    st.caption(f"{note}假設火點持續排放、每 {RELEASE_STEP} 小時釋放一批煙團；圈越大代表煙齡越長、擴散越廣，顏色越淡代表越老。"
                "此為簡化軌跡模型：未含邊界層高度、垂直混合、乾濕沉降與降雨清除，風場為 10 m 風，"
                "數值僅供情境比較。正式決策請搭配 CAMS、HYSPLIT 或 ASMC 官方預報。")
 
-    with st.expander("📈 查看風場時序（區域中心）"):
-        hrs = list(range(0, min(H, 168) + 1))
-        wsp = [float(np.hypot(cu[h], cv[h])) for h in hrs]
-        st.line_chart(pd.DataFrame({"風速 (km/h)": wsp}, index=hrs))
-        pts = [h for h in [0, 6, 12, 18, 24, 48, 72, 96, 120, 144, 168] if h <= H]
+    with st.expander("📈 查看風場時序（區域中心，未來 7 天）"):
+        st.line_chart(pd.DataFrame({"風速 (km/h)": [float(np.hypot(cu[h], cv[h])) for h in range(N_HOURS)]},
+                                   index=list(range(N_HOURS))))
+        pts = [0, 6, 12, 18, 24, 48, 72, 96, 120, 144, 168]
         st.dataframe(pd.DataFrame({
             "時間": [f"T+{h} 小時" for h in pts],
             "風速 (km/h)": [round(float(np.hypot(cu[h], cv[h])), 1) for h in pts],
