@@ -359,25 +359,62 @@ def deck_for(layers):
 # ==========================================
 # 4. 側邊欄與資料載入
 # ==========================================
-st.sidebar.header("🔑 設定")
-cwa_key = st.sidebar.text_input("氣象署授權碼 (CWA_API_KEY)", value=secret("CWA_API_KEY"), type="password",
-                                help="用來取得雨量站座標；至 opendata.cwa.gov.tw 免費註冊取得")
-gemini_key = st.sidebar.text_input("Gemini API Key", value=secret("GEMINI_API_KEY"), type="password")
-show_sat = st.sidebar.checkbox("顯示衛星空照底圖", value=True)
-force_demo = st.sidebar.checkbox("強制使用示範資料（非真實）", value=False)
+# 直接讀取金鑰，不放進網頁輸入框
+cwa_key = secret("CWA_API_KEY")
+gemini_key = secret("GEMINI_API_KEY")
 
+# 展示頁面只保留非敏感設定
+st.sidebar.header("⚙️ 展示設定")
+
+show_sat = st.sidebar.checkbox(
+    "顯示衛星空照底圖",
+    value=True,
+)
+
+force_demo = st.sidebar.checkbox(
+    "強制使用示範資料（非真實）",
+    value=False,
+)
+
+# 只顯示設定狀態，不顯示金鑰內容
+st.sidebar.caption(
+    "氣象署 API：已設定" if cwa_key else "氣象署 API：未設定"
+)
+st.sidebar.caption(
+    "Gemini API：已設定" if gemini_key else "Gemini API：未設定"
+)
+
+# 以下維持原本資料取得邏輯
 alerts, err_a = fetch_alerts()
 deb, err_d = fetch_debris_rain()
 ls, err_l = fetch_ls_values()
-cwa, err_c = fetch_cwa_rain(cwa_key) if cwa_key else (None, "未提供氣象署授權碼")
+
+cwa, err_c = (
+    fetch_cwa_rain(cwa_key)
+    if cwa_key
+    else (None, "未提供氣象署授權碼")
+)
 
 is_demo = force_demo or deb is None
+
 if is_demo:
     alerts, deb, ls, cwa = make_demo()
+
 if alerts is None:
     alerts = _alert_df([])
+
 if ls is None:
-    ls = pd.DataFrame(columns=["County", "Town", "LSNo", "Name", "AlertValue", "Lng", "Lat"])
+    ls = pd.DataFrame(
+        columns=[
+            "County",
+            "Town",
+            "LSNo",
+            "Name",
+            "AlertValue",
+            "Lng",
+            "Lat",
+        ]
+    )
 
 st.title("⛰️ 坡地複合災害決策孿生")
 st.caption("即時雨量 × 警戒基準值 × 官方警戒 × 情境推演 × AI 決策建議　｜　資料：農村水保署、中央氣象署（政府資料開放授權）")

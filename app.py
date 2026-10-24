@@ -22,17 +22,30 @@ st.set_page_config(
 )
 
 # 支援由 Streamlit 雲端 Secrets 自動載入，若無則降階由側邊欄手動輸入
-default_firms_key = st.secrets.get("NASA_FIRMS_KEY", "")
-default_gemini_key = st.secrets.get("GEMINI_API_KEY", "")
+# 從 Secrets 讀取金鑰，不放進前端輸入框
+firms_key = st.secrets.get("NASA_FIRMS_KEY", "")
+gemini_key = st.secrets.get("GEMINI_API_KEY", "")
 
 st.title("🔥 印尼泥炭地野火與跨國霧霾擴散決策孿生平台")
-st.caption("基於 NASA VIIRS 衛星熱點、Open-Meteo 逐時風場預報（最長 7 天）、拉格朗日煙團軌跡模擬與 GeoAI 決策代理人")
+st.caption(
+    "基於 NASA VIIRS 衛星熱點、Open-Meteo 逐時風場預報（最長 7 天）、"
+    "拉格朗日煙團軌跡模擬與 GeoAI 決策代理人"
+)
 
 with st.sidebar:
     st.header("⚙️ 系統設定與連線")
-    firms_key = st.text_input("NASA FIRMS MAP_KEY", value=default_firms_key, type="password")
-    gemini_key = st.text_input("Google Gemini API Key", value=default_gemini_key, type="password")
-    
+
+    # 只顯示設定狀態，不顯示金鑰內容
+    st.caption(
+        "NASA FIRMS API：已設定"
+        if firms_key
+        else "NASA FIRMS API：未設定"
+    )
+    st.caption(
+        "Google Gemini API：已設定"
+        if gemini_key
+        else "Google Gemini API：未設定"
+    )
     st.markdown("---")
     st.header("📍 監控場域選定")
     region_choice = st.radio(
