@@ -5,3 +5,4 @@ requests
 pydeck
 Pillow
 google-generativeai
+shapely>=2.0
