@@ -558,13 +558,96 @@ def load_catchments():
             continue
         g = unary_union([by[n] for n in parts])
         shapely.prepare(g)
-        out[name] = {"geom": g, "parts": "、".join(parts)}
+        out[name] = {"geom": g, "parts": "、".join(parts), "own": by.get(name), "ints": [by[n] for n in parts if n != name]}
         for n in parts:
             for poly in (by[n].geoms if hasattr(by[n], "geoms") else [by[n]]):
                 rows.append({"polygon": [list(c) for c in poly.exterior.coords], "title": esc(n),
                              "l1": esc("集水區（取水口）" if n != name else "集水區"), "l2": esc(f"屬於：{name}"),
                              "intake": n != name})
     return out, pd.DataFrame(rows)
+
+
+@st.cache_resource(show_spinner=False)
+def load_basins(_catch_keys):
+    """流域範圍（水利署，143 個）與主河道。回傳 dict：
+    res {水庫名: {"label": 顯示名稱, "geom": 水庫本身流域＋引水來源流域的聯集}}、df（供地圖）、rivers（主河道 GeoJSON 或 None）。
+    離槽水庫的水來自其他流域（例如湖山←桶頭堰在濁水溪水系），所以同時標示本身與引水的流域。"""
+    d = Path(__file__).parent / "data"
+    p = d / "river_basins.geojson"
+    if not p.exists():
+        return None
+    feats = json.load(open(p, encoding="utf-8"))["features"]
+    geoms = {f["properties"]["name"]: shape(f["geometry"]) for f in feats}
+
+    def main_basin(g):
+        best = max(((x.intersection(g).area, n) for n, x in geoms.items() if x.intersects(g)), default=None)
+        return best[1] if best and best[0] > 0 else None
+
+    res_b = {}
+    for name, (la, lo) in RES_GEO.items():
+        c = catch.get(name)
+        own = main_basin(c["own"]) if c and c.get("own") is not None else None
+        if own is None:
+            hit = [n for n, g in geoms.items() if shapely.contains_xy(g, lo, la)]
+            own = hit[0] if hit else None
+        if own is None:
+            continue
+        ints = []
+        for ig in (c["ints"] if c else []):
+            nb = main_basin(ig)
+            if nb and nb != own and nb not in ints:
+                ints.append(nb)
+        g = unary_union([geoms[n] for n in [own] + ints])
+        shapely.prepare(g)
+        res_b[name] = {"label": own + (f"（引水：{'、'.join(ints)}）" if ints else ""), "geom": g, "names": [own] + ints}
+    rows = []
+    for n in sorted({n for v in res_b.values() for n in v["names"]}):
+        for poly in (geoms[n].geoms if hasattr(geoms[n], "geoms") else [geoms[n]]):
+            rows.append({"polygon": [list(c) for c in poly.exterior.coords], "title": esc(f"流域：{n}"),
+                         "l1": esc("、".join(k for k, v in res_b.items() if n in v["names"])), "l2": ""})
+    rv = d / "main_rivers.geojson"
+    rivers = json.load(open(rv, encoding="utf-8")) if rv.exists() else None
+    return {"res": res_b, "df": pd.DataFrame(rows), "rivers": rivers}
+
+
+@st.cache_resource(show_spinner=False)
+def load_river_alert():
+    p = Path(__file__).parent / "data" / "river_alert_stations.csv"
+    return pd.read_csv(p, dtype={"id": str}) if p.exists() else pd.DataFrame()
+
+
+def load_river_status():
+    """即時河川水位（最新一筆）× 警戒水位。一級最高；grade：1＝達一級、2＝達二級、3＝達三級、0＝未達。
+    margin＝距上方最近一個警戒值的差（公尺）。警戒水位與即時水位均視為標高（EL.），此點以數值比對推斷。"""
+    base = load_river_alert()
+    if base.empty:
+        return pd.DataFrame(), "找不到 data/river_alert_stations.csv"
+    url = secret("RIVER_STAGE_URL")
+    if not url:
+        return pd.DataFrame(), "未設定 RIVER_STAGE_URL"
+    js, err = fetch_url_json(url)
+    if js is None:
+        return pd.DataFrame(), err
+    rt = _lower(js)
+    rt["id"] = rt["stationid"].astype(str).str.strip()
+    rt["level"] = pd.to_numeric(rt["waterlevel"], errors="coerce")
+    rt["t"] = pd.to_datetime(rt["datetime"], errors="coerce")
+    rt = rt.dropna(subset=["level"]).sort_values("t").drop_duplicates("id", keep="last")
+    df = base.merge(rt[["id", "level", "t"]], on="id", how="inner")
+    now = pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None)
+    df["age_h"] = ((now - df["t"]).dt.total_seconds() / 3600).round(1)
+
+    def calc(r):
+        th = {1: r["l1"], 2: r["l2"], 3: r["l3"]}
+        g = next((k for k in (1, 2, 3) if pd.notna(th[k]) and r["level"] >= th[k]), 0)
+        above = [v for v in th.values() if pd.notna(v) and v > r["level"]]
+        return pd.Series({"grade": g, "margin": round(min(above) - r["level"], 2) if above else np.nan})
+    df = pd.concat([df, df.apply(calc, axis=1)], axis=1)
+    # 合理性檢查：一級警戒值與即時水位通常只差約 1～16 m（166 站實測）；差太多代表站名配對可能有誤，不納入判斷
+    d = df["level"] - df["l1"]
+    df["suspect"] = (d > 15) | (d < -60)
+    df.loc[df["suspect"], ["grade", "margin"]] = [0, np.nan]
+    return df, ""
 
 
 def haversine_km(lat1, lon1, lat2, lon2):
@@ -583,7 +666,7 @@ def in_upstream(r_name, alat, alon, df, radius, catch):
     return df[haversine_km(alat, alon, df["lat"].values, df["lon"].values) <= radius]
 
 
-def link_slopes_to_reservoirs(res, deb_s, lsd, radius, low, catch=None):
+def link_slopes_to_reservoirs(res, deb_s, lsd, radius, low, catch=None, basins=None, rv=None):
     """對每座水庫統計上游的溪流（以參考雨量站座標近似）與大規模崩塌潛勢區。
     有水利署集水區多邊形的水庫用多邊形判斷（離槽水庫含取水口集水區），其餘以半徑近似。
     關注等級為透明的規則式分類（非官方指標）：上游有官方紅色警戒 ＝ 2；黃色警戒或推估達標 ＝ 1；
@@ -594,7 +677,18 @@ def link_slopes_to_reservoirs(res, deb_s, lsd, radius, low, catch=None):
     for r in res.itertuples():
         c = catch.get(r.name)
         x = dict(n_deb=0, n_reach=0, deb_r=0, deb_y=0, max_ratio=np.nan, ls_n=0, ls_r=0, ls_y=0, county="",
-                 method="集水區多邊形" if c else "半徑近似", scope=c["parts"] if c else f"中心點半徑 {radius} km")
+                 method="集水區多邊形" if c else "半徑近似", scope=c["parts"] if c else f"中心點半徑 {radius} km",
+                 basin="", bn_r=0, bn_y=0, bn_reach=0)
+        bi = (basins or {}).get("res", {}).get(r.name)
+        bg = bi["geom"] if bi else None
+        if bg is not None:
+            x["basin"] = bi["label"]
+            if not dd.empty:
+                nb = dd[shapely.contains_xy(bg, dd["lon"].values, dd["lat"].values)]
+                x.update(bn_r=int((nb["off"] == "r").sum()), bn_y=int((nb["off"] == "y").sum()), bn_reach=int((nb["ratio"] >= 1).sum()))
+            if lsd is not None and not lsd.empty:
+                mb = lsd[shapely.contains_xy(bg, lsd["lon"].values, lsd["lat"].values)]
+                x["bn_r"] += int((mb["lv"] == "r").sum()); x["bn_y"] += int((mb["lv"] == "y").sum())
         if not dd.empty:
             near = in_upstream(r.name, r.alat, r.alon, dd, radius, catch)
             x.update(n_deb=len(near), n_reach=int((near["ratio"] >= 1).sum()),
@@ -611,6 +705,16 @@ def link_slopes_to_reservoirs(res, deb_s, lsd, radius, low, catch=None):
         if lsd is not None and not lsd.empty:
             m = in_upstream(r.name, r.alat, r.alon, lsd, radius, catch)
             x.update(ls_n=len(m), ls_r=int((m["lv"] == "r").sum()), ls_y=int((m["lv"] == "y").sum()))
+        x.update(rv_n=0, rv_exc=0, rv_margin=np.nan, rvb_n=0, rvb_exc=0)
+        if rv is not None and not rv.empty:
+            fr = rv[(rv["age_h"] <= 24) & ~rv["suspect"]]          # 超過 24 小時沒更新、或配對疑似有誤的測站不納入
+            if c is not None:
+                ic = fr[shapely.contains_xy(c["geom"], fr["lon"].values, fr["lat"].values)]
+                x.update(rv_n=len(ic), rv_exc=int((ic["grade"] > 0).sum()),
+                         rv_margin=float(ic["margin"].min()) if ic["margin"].notna().any() else np.nan)
+            if bg is not None:
+                ib = fr[shapely.contains_xy(bg, fr["lon"].values, fr["lat"].values)]
+                x.update(rvb_n=len(ib), rvb_exc=int((ib["grade"] > 0).sum()))
         rows.append(x)
     link = pd.concat([res.reset_index(drop=True), pd.DataFrame(rows)], axis=1)
     red = link["deb_r"] + link["ls_r"]
@@ -742,6 +846,8 @@ has_xy = deb["lat"].notna().any()
 
 res, res_errs, res_is_demo = load_reservoirs(force_demo)
 catch, catch_df = load_catchments()
+basins = load_basins(tuple(sorted(catch)))
+rv, rv_err = load_river_status()
 with st.expander("🚰 水庫資料來源狀態"):
     if res_is_demo:
         st.write("水庫為**示範資料（非真實，取自簡報蓄水率）**。" + ("" if force_demo else "原因：" + "；".join(f"{k}：{v}" for k, v in res_errs.items() if v)))
@@ -979,8 +1085,17 @@ def scenario_deb():
 
 def get_link():
     if "v" not in _LINK_CACHE:
-        _LINK_CACHE["v"] = link_slopes_to_reservoirs(res, scenario_deb(), ls_layer_df(ls, alerts), radius_km, low_pct, catch)
+        _LINK_CACHE["v"] = link_slopes_to_reservoirs(res, scenario_deb(), ls_layer_df(ls, alerts), radius_km, low_pct, catch, basins, rv)
     return _LINK_CACHE["v"]
+
+
+def rv_text():
+    if rv.empty:
+        return "未提供即時河川水位資料，無法比對警戒水位"
+    fr = rv[(rv["age_h"] <= 24) & ~rv["suspect"]]
+    hit = fr[fr["grade"] > 0].sort_values("grade")
+    names = "、".join(f"{r['name']}（{r['river']}，達{int(r['grade'])}級）" for _, r in hit.head(8).iterrows())
+    return f"{len(fr)} 站可與警戒水位比對（僅最新一筆、無漲落趨勢）；已達警戒 {len(hit)} 站" + (f"：{names}" if names else "")
 
 
 def build_res_context():
@@ -990,13 +1105,15 @@ def build_res_context():
     for r in cand.itertuples():
         rain = f"，集水區近24小時 {r.rain24:.0f} mm" if pd.notna(r.rain24) else ""
         parts.append(f"{r.name}（蓄水率 {r.pct:.0f}%{rain}；上游溪流 {r.n_deb} 條、推估達標 {r.n_reach} 條、"
-                     f"官方紅{r.deb_r}／黃{r.deb_y}，崩塌區紅{r.ls_r}／黃{r.ls_y}；{r.flags}）")
+                     f"官方紅{r.deb_r}／黃{r.deb_y}，崩塌區紅{r.ls_r}／黃{r.ls_y}；{r.flags}"
+                     + (f"；集水區內河川水位站已達警戒 {r.rv_exc} 站" if r.rv_exc else "")
+                     + (f"；所屬流域 {r.basin}，同流域官方紅{r.bn_r}／黃{r.bn_y}（範圍遠大於集水區，僅供參考）" if r.basin else "") + "）")
     low = link[link["pct"] < low_pct]["name"].tolist()
     opsl = [f"{r.name}（{r.ops}）" for r in link.itertuples() if r.ops != "—"]
     short = [f"{r.name}約 {r.days:.0f} 天" for r in link.dropna(subset=["days"]).sort_values("days").head(3).itertuples()]
     return {"text": "；".join(parts) or "目前沒有水庫上游出現警戒或推估達標",
             "low": "、".join(low) or "無", "n": len(link),
-            "ops": "、".join(opsl) or "無", "short": "、".join(short) or "無資料"}
+            "ops": "、".join(opsl) or "無", "short": "、".join(short) or "無資料", "rv": rv_text()}
 
 
 def call_gemini(prompt, key):
@@ -1041,8 +1158,9 @@ with tab3:
 - 推估達基準值最多的縣市：{ctx['cty']}
 - 最接近或已達基準值的溪流：{ctx['top']}
 - 水庫面（{'示範資料，非真實' if res_is_demo else '水利署水庫水情，蓄水率＝有效蓄水量÷有效容量'}；共 {rctx['n']} 座）：蓄水率低於 {low_pct}% 的水庫：{rctx['low']}
-- 水庫與上游坡地關聯（以水利署水庫集水區多邊形判斷，離槽水庫含取水口集水區；無多邊形者以半徑 {radius_km} km 近似；溪流位置為參考雨量站座標的近似）：{rctx['text']}
+- 水庫與上游坡地關聯（以水利署水庫集水區多邊形判斷，離槽水庫含取水口集水區；無多邊形者以半徑 {radius_km} km 近似；溪流位置為參考雨量站座標的近似；「同流域」統計範圍較廣，不代表會影響該水庫）：{rctx['text']}
 - 水庫運轉：排砂或溢洪的水庫：{rctx['ops']}；以目前取水速度粗估可支撐天數最短的水庫（不計入流，非供水保證）：{rctx['short']}
+- 河川水位（水利署警戒水位基本資料，僅 200 站有警戒值，配對不完整）：{rctx['rv']}
 法規背景：依災害防救法第 24 條，黃色警戒應進行疏散避難勸告；紅色警戒應勸告或強制撤離，並作適當安置。
 
 請只使用上述數據，不要編造未提供的數字或地名；數據不足之處請明確說明不確定性。
@@ -1110,7 +1228,11 @@ with tab4:
     m3.metric("關注等級 ≥ 2（含紅色警戒）", n_prio)
     m4.metric(f"蓄水率 < {low_pct}%／資料過期", f"{n_low} ／ {n_stale}")
 
-    show_catch = st.checkbox("顯示集水區範圍", value=True)
+    cc1, cc2, cc3 = st.columns(3)
+    show_catch = cc1.checkbox("顯示集水區範圍", value=True)
+    show_basin = cc2.checkbox("顯示所屬流域範圍", value=False)
+    show_river = cc3.checkbox("顯示主河道（約 1 MB，較慢）", value=False)
+    show_rv = st.checkbox("顯示河川水位站（有警戒值者；顏色＝已達警戒等級）", value=not rv.empty)
     layers = []
     if show_sat:
         mm = satellite_mosaic(119.8, 21.7, 122.3, 25.5, 9)
@@ -1120,6 +1242,27 @@ with tab4:
         layers.append(pdk.Layer("PolygonLayer", id="catchments", data=catch_df, get_polygon="polygon",
                                 get_fill_color=[30, 100, 200, 28], get_line_color=[30, 100, 200, 200],
                                 line_width_min_pixels=1, stroked=True, filled=True, pickable=True,
+                                parameters={"depthTest": False}))
+    if show_basin and basins and not basins["df"].empty:
+        layers.append(pdk.Layer("PolygonLayer", id="basins", data=basins["df"], get_polygon="polygon",
+                                get_fill_color=[120, 120, 120, 8], get_line_color=[90, 90, 90, 200],
+                                line_width_min_pixels=1, stroked=True, filled=True, pickable=True,
+                                parameters={"depthTest": False}))
+    if show_river and basins and basins["rivers"]:
+        layers.append(pdk.Layer("GeoJsonLayer", id="rivers", data=basins["rivers"], stroked=False, filled=False,
+                                get_line_color=[40, 120, 220, 190], line_width_min_pixels=1,
+                                parameters={"depthTest": False}))
+    if show_rv and not rv.empty:
+        cmap = {1: [200, 30, 30, 235], 2: [255, 140, 0, 235], 3: [240, 200, 0, 235], 0: [70, 110, 160, 210]}
+        rd = rv.rename(columns={"l1": "t1", "l2": "t2", "l3": "t3"})   # l1/l2 要留給地圖提示文字
+        rd["fill"] = [[150, 150, 150, 150] if (a > 24 or sp) else cmap[g] for a, g, sp in zip(rd["age_h"], rd["grade"], rd["suspect"])]
+        rd["title"] = rd["name"].apply(lambda n: esc(f"水位站：{n}"))
+        rd["l1"] = rd.apply(lambda r: esc(f"水位 {r['level']:.2f} m（EL.）｜" + ("資料過期" if r["age_h"] > 24 else "配對疑似有誤，不納入" if r["suspect"] else
+                            ("已達 %d 級警戒" % r["grade"] if r["grade"] else "未達警戒"))), axis=1)
+        rd["l2"] = rd.apply(lambda r: esc("警戒值 一級 %s／二級 %s／三級 %s m" % tuple("—" if pd.isna(v) else f"{v:g}" for v in (r["t1"], r["t2"], r["t3"]))
+                                           + ("" if pd.isna(r["margin"]) else f"｜距上一級 {r['margin']:.2f} m")), axis=1)
+        layers.append(pdk.Layer("ScatterplotLayer", id="rivergauge", data=rd, get_position=["lon", "lat"],
+                                get_radius=1800, radius_min_pixels=5, get_fill_color="fill", pickable=True,
                                 parameters={"depthTest": False}))
     stn4 = aggregate_stations(ds) if has_xy else pd.DataFrame()
     if not stn4.empty:
@@ -1153,7 +1296,13 @@ with tab4:
     tb = link.sort_values(["rank", "pct"], ascending=[False, True])
     st.dataframe(pd.DataFrame({
         "水庫": tb["name"], "關注等級": tb["rank"].map({3: "3 優先", 2: "2 關注", 1: "1 留意", 0: "—"}),
-        "原因": tb["flags"], "運轉狀態": tb["ops"], "判斷方式": tb["method"], "涵蓋範圍": tb["scope"], "蓄水率 %": tb["pct"].astype("Int64"),
+        "原因": tb["flags"], "運轉狀態": tb["ops"], "判斷方式": tb["method"], "涵蓋範圍": tb["scope"],
+        "所屬流域": tb["basin"].replace("", "—"),
+        "同流域官方紅／黃（較廣，僅供參考）": tb["bn_r"].astype(str) + "／" + tb["bn_y"].astype(str),
+        "同流域推估達標": tb["bn_reach"],
+        "集水區內水位站": tb["rv_n"], "已達警戒": tb["rv_exc"],
+        "最近餘裕(m)": tb["rv_margin"], "同流域水位站達警戒／站數": tb["rvb_exc"].astype(str) + "／" + tb["rvb_n"].astype(str),
+        "蓄水率 %": tb["pct"].astype("Int64"),
         "可支撐天數(粗估)": tb["days"].map(lambda v: "—" if pd.isna(v) else (">999" if v > 999 else f"{v:.0f}")),
         "天數依據": tb["draw_src"].replace("", "—"),
         "觀測時間": tb["obs"].dt.strftime("%m/%d %H:%M").fillna("—"),
@@ -1164,6 +1313,20 @@ with tab4:
     }), hide_index=True, use_container_width=True)
     st.caption(f"關注等級規則（透明、可在側邊欄調整，非官方指標）：上游有官方紅色警戒＝2；有黃色警戒或推估達標溪流＝1；"
                f"以上任一成立且蓄水率 < {low_pct}% 再加 1。官方警戒數以溪流筆數計；同一條溪流落在多座水庫的半徑內時，會分別計入各水庫。")
+
+    if basins:
+        st.markdown("##### 🌊 依流域彙整（同一河系的水庫與取水口）")
+        gb = link[link["basin"] != ""].groupby("basin").agg(
+            水庫=("name", "、".join), 座數=("name", "count"), 最低蓄水率=("pct", "min"),
+            紅=("bn_r", "first"), 黃=("bn_y", "first"), 推估達標=("bn_reach", "first"), 最高關注等級=("rank", "max"),
+            水位站達警戒=("rvb_exc", "first"), 水位站數=("rvb_n", "first")
+        ).reset_index().sort_values(["紅", "黃"], ascending=False)
+        gb["同流域官方紅／黃"] = gb["紅"].astype(str) + "／" + gb["黃"].astype(str)
+        gb["水位站達警戒／站數"] = gb["水位站達警戒"].astype(str) + "／" + gb["水位站數"].astype(str)
+        st.dataframe(gb[["basin", "水庫", "座數", "最低蓄水率", "同流域官方紅／黃", "推估達標", "水位站達警戒／站數", "最高關注等級"]].rename(columns={"basin": "流域"}),
+                     hide_index=True, use_container_width=True)
+        st.caption("「同流域」是以水利署流域範圍判斷，範圍遠大於各水庫自己的集水區，也包含水庫下游；"
+                   "它只表示同一條河系的坡地狀況，**不代表會影響該水庫**，也不納入關注等級。")
 
     st.markdown("##### 🔍 單一水庫：上游最接近基準值的溪流")
     pick = st.selectbox("選擇水庫", link["name"].tolist())
@@ -1194,13 +1357,14 @@ with tab4:
 
     with st.expander("⚠️ 這個分析還缺什麼資料（所以不能回答「供水會不會中斷」）"):
         st.markdown("""
+- **河川圖資的限制**：水利署「主河道」圖層是零碎的線段（單一河川由數百段不相連的線組成），無法判斷河段上下游與流向；「支流」圖層（河川區域多邊形）及其河川等級代碼（RIVER_TYPE）的意義未確認，因此尚未納入。目前只能做到「同一流域」的粗略分組，做不到沿河追溯取水口下游。
 - **其他引水關係**：已納入 6 座離槽水庫的取水口集水區（鯉魚潭←士林攔河堰、寶山第二←上坪堰、永和山←田美攔河堰、湖山←桶頭堰、仁義潭←竹山堰、日月潭←栗栖壩）。水利署圖層另有武界壩等，與水庫的引水關係未納入，可在 `CATCH_INTAKES` 補充；阿公店←月眉堰等不在目前清單。
 - **溪流與崩塌區的實際座標**：溪流位置目前是參考雨量站座標的近似，靠近集水區邊界時可能誤判；集水區圖資為 2023 年建置，且每 10 年左右才檢討。
 - **水質／濁度**：坡地崩塌影響供水的主要途徑是濁度與泥砂，需水庫入庫水質或淨水場原水濁度。
 - **供水區對照**：哪座水庫供應哪些淨水場、哪些用戶，需自來水公司或水利署的供水系統資料；澄清湖與澎湖水庫不在目前的水利署資料集內。
 - **定量降水預報**：情境推演的「未來 24 小時再降雨」目前是手動輸入，可改接氣象署預報。
 - **防洪運轉狀態代碼（statustype）的意義**：資料有 -1、3、4 等值，需水利署代碼說明才能解讀。
-- **河川水位的警戒值與歷史序列**：目前河川即時水位只有最新一筆且缺警戒水位，無法判斷高低；集水區內的測站也很少。
+- **河川水位的歷史序列與完整警戒值**：即時水位只有最新一筆，看不出漲落；警戒值只有 200 站，其中約三成有三級警戒值。警戒水位資料沒有測站代號，是用站名加流域配對，淡水河（含碧潭橋、秀朗橋等）、大安溪的卓蘭橋與雪山坑橋等 34 站沒配到，另有數值明顯不合者會被排除，而且集水區內的水位站很少。
 - **集水區降雨資料的固定網址與更新頻率**：目前只有你提供的檔案，需設定 `CATCHMENT_URL`。
 """)
 
